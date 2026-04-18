@@ -3,6 +3,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstring>
+#include <string>
 
 static int failures = 0;
 #define CHECK(cond, msg) do { if (!(cond)) { fprintf(stderr, "FAIL: %s\n", msg); ++failures; } } while (0)
@@ -77,6 +78,34 @@ static void test_rewrite_record_chimera(void)
     free(out.s);
 }
 
+static void test_group_propagation(void)
+{
+    /* Two records with same QNAME. First is chimeric (will fail), second is clean.
+     * Expected: both emerge with 0x200 set and 0x2 cleared. */
+    std::string input =
+        "r1\t99\tfchr1\t100\t60\t30M70S\t=\t200\t0\t"
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN\t*\n"
+        "r1\t147\tfchr1\t200\t60\t100M\t=\t100\t-150\t"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\t*\n";
+    kstring_t out = {0, 0, NULL};
+    int rc = meth_process_stream_from_string(input.c_str(), &out, 0, 0);
+    CHECK(rc == 0, "stream process rc");
+
+    /* Both lines should have 0x200 and not 0x2. */
+    const char *p = out.s;
+    for (int i = 0; i < 2; ++i) {
+        const char *tab = strchr(p, '\t');
+        CHECK(tab != NULL, "found first tab");
+        int flag = atoi(tab + 1);
+        CHECK((flag & 0x200) != 0, "group-propagated 0x200");
+        CHECK((flag & 0x2) == 0,   "group-propagated not-proper");
+        p = strchr(p, '\n');
+        CHECK(p != NULL, "newline");
+        if (p) p += 1;
+    }
+    free(out.s);
+}
+
 int main(void)
 {
     test_longest_m();
@@ -84,6 +113,7 @@ int main(void)
     test_rewrite_passthrough();
     test_rewrite_record_forward();
     test_rewrite_record_chimera();
+    test_group_propagation();
     if (failures > 0) { fprintf(stderr, "%d test(s) failed\n", failures); return 1; }
     fprintf(stderr, "OK\n");
     return 0;
