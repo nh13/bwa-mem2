@@ -40,11 +40,50 @@ static void test_rewrite_passthrough(void)
     free(out.s);
 }
 
+static void test_rewrite_record_forward(void)
+{
+    kstring_t out = {0, 0, NULL};
+    /* Aligned to f-strand; no chimera. */
+    const char *in =
+        "r1\t99\tfchr1\t100\t60\t100M\t=\t200\t150\t"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\t"
+        "IIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIIII\t"
+        "NM:i:0\tYS:Z:AAAAA";
+    int rc = meth_rewrite_record(in, &out, /*set_as_failed*/ 0, /*no_chim*/ 0);
+    CHECK(rc == 1, "rewrite_record rc");
+    /* Should strip 'f', drop YS, append YD:Z:f. */
+    CHECK(strstr(out.s, "\tchr1\t") != NULL, "f prefix stripped");
+    CHECK(strstr(out.s, "YS:Z") == NULL, "YS stripped");
+    CHECK(strstr(out.s, "YD:Z:f") != NULL, "YD:Z:f appended");
+    free(out.s);
+}
+
+static void test_rewrite_record_chimera(void)
+{
+    kstring_t out = {0, 0, NULL};
+    /* 100bp read with longest M = 30 (<44%). Must get 0x200, lose 0x2, mapq capped at 1. */
+    const char *in =
+        "r2\t99\trchr1\t100\t60\t30M70S\t=\t200\t0\t"
+        "NNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNNN\t"
+        "*\tNM:i:0";
+    int rc = meth_rewrite_record(in, &out, 0, 0);
+    CHECK(rc == 1, "chimera rewrite_record rc");
+    CHECK(strstr(out.s, "YD:Z:r") != NULL, "YD:Z:r (from rchr1)");
+    /* Assert flag field (2nd col) has 0x200 set and 0x2 cleared. */
+    char *flag_start = strchr(out.s, '\t') + 1;
+    int flag = atoi(flag_start);
+    CHECK((flag & 0x200) != 0, "0x200 set");
+    CHECK((flag & 0x2) == 0,   "0x2 cleared");
+    free(out.s);
+}
+
 int main(void)
 {
     test_longest_m();
     test_rewrite_sq();
     test_rewrite_passthrough();
+    test_rewrite_record_forward();
+    test_rewrite_record_chimera();
     if (failures > 0) { fprintf(stderr, "%d test(s) failed\n", failures); return 1; }
     fprintf(stderr, "OK\n");
     return 0;
