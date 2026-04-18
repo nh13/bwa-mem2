@@ -91,18 +91,46 @@ static void test_group_propagation(void)
     int rc = meth_process_stream_from_string(input.c_str(), &out, 0, 0);
     CHECK(rc == 0, "stream process rc");
 
-    /* Both lines should have 0x200 and not 0x2. */
+    /* Both record lines should have 0x200 and not 0x2.
+     * Skip header lines (start with '@') like the injected @PG. */
     const char *p = out.s;
-    for (int i = 0; i < 2; ++i) {
+    int records_seen = 0;
+    while (*p && records_seen < 2) {
+        if (*p == '@') {
+            const char *nl = strchr(p, '\n');
+            p = nl ? nl + 1 : p + strlen(p);
+            continue;
+        }
         const char *tab = strchr(p, '\t');
         CHECK(tab != NULL, "found first tab");
+        if (!tab) break;
         int flag = atoi(tab + 1);
         CHECK((flag & 0x200) != 0, "group-propagated 0x200");
         CHECK((flag & 0x2) == 0,   "group-propagated not-proper");
-        p = strchr(p, '\n');
-        CHECK(p != NULL, "newline");
-        if (p) p += 1;
+        const char *nl = strchr(p, '\n');
+        CHECK(nl != NULL, "newline");
+        if (!nl) break;
+        p = nl + 1;
+        records_seen += 1;
     }
+    CHECK(records_seen == 2, "two records seen");
+    free(out.s);
+}
+
+static void test_pg_injection(void)
+{
+    std::string input =
+        "@HD\tVN:1.6\n"
+        "@SQ\tSN:fchr1\tLN:1000\n"
+        "@PG\tID:bwa-mem2\tPN:bwa-mem2\tVN:2.2.1\n"
+        "r1\t4\t*\t0\t0\t*\t*\t0\t0\tAAAA\t!!!!\n";
+    kstring_t out = {0, 0, NULL};
+    meth_process_stream_from_string(input.c_str(), &out, 0, 0);
+    CHECK(strstr(out.s, "\n@PG\tID:bwa-mem2-meth\t") != NULL, "bwa-mem2-meth @PG injected");
+    /* Must be between last header line and first record. */
+    const char *pg = strstr(out.s, "@PG\tID:bwa-mem2-meth");
+    const char *r1 = strstr(out.s, "\nr1\t");
+    CHECK(pg != NULL && r1 != NULL && pg < r1, "PG before records");
     free(out.s);
 }
 
@@ -114,6 +142,7 @@ int main(void)
     test_rewrite_record_forward();
     test_rewrite_record_chimera();
     test_group_propagation();
+    test_pg_injection();
     if (failures > 0) { fprintf(stderr, "%d test(s) failed\n", failures); return 1; }
     fprintf(stderr, "OK\n");
     return 0;

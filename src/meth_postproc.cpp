@@ -177,7 +177,8 @@ static void propagate_group_qcfail(std::vector<std::string> &group)
 }
 
 static int process_stream(FILE *in, FILE *out_fp, kstring_t *out_ks,
-                          char set_as_failed, int no_chim)
+                          char set_as_failed, int no_chim,
+                          const char *pg_line)
 {
     char *line = NULL;
     size_t cap = 0;
@@ -185,6 +186,7 @@ static int process_stream(FILE *in, FILE *out_fp, kstring_t *out_ks,
     std::vector<std::string> group;
     std::string group_qname;
     kstring_t rewritten = {0, 0, NULL};
+    int pg_emitted = 0;
 
     while ((n = getline(&line, &cap, in)) != -1) {
         if (n > 0 && line[n-1] == '\n') { line[n-1] = '\0'; n -= 1; }
@@ -196,6 +198,12 @@ static int process_stream(FILE *in, FILE *out_fp, kstring_t *out_ks,
                 if (out_ks) kputs(rewritten.s, out_ks);
             }
             continue;
+        }
+        /* First record: emit @PG just before */
+        if (!pg_emitted && pg_line != NULL) {
+            if (out_fp) fputs(pg_line, out_fp);
+            if (out_ks) kputs(pg_line, out_ks);
+            pg_emitted = 1;
         }
         /* flush previous group on QNAME change */
         const char *tab = strchr(line, '\t');
@@ -232,10 +240,15 @@ int meth_process_stream_from_string(const char *input, kstring_t *out,
 {
     FILE *fp = fmemopen((void *)input, strlen(input), "r");
     if (fp == NULL) return -1;
-    int rc = process_stream(fp, NULL, out, set_as_failed, no_chim);
+    const char *pg = "@PG\tID:bwa-mem2-meth\tPN:bwa-mem2-meth\tVN:test\n";
+    int rc = process_stream(fp, NULL, out, set_as_failed, no_chim, pg);
     fclose(fp);
     return rc;
 }
+
+#ifndef BWAMEM2_METH_VERSION
+#define BWAMEM2_METH_VERSION "2.2.1-meth"
+#endif
 
 int meth_postproc_main(int argc, char *argv[])
 {
@@ -256,5 +269,14 @@ int meth_postproc_main(int argc, char *argv[])
             return usage(stderr);
         }
     }
-    return process_stream(stdin, stdout, NULL, set_as_failed, no_chim);
+    /* Build @PG from argv */
+    kstring_t pg = {0, 0, NULL};
+    ksprintf(&pg, "@PG\tID:bwa-mem2-meth\tPN:bwa-mem2-meth\tVN:%s\tCL:%s",
+             BWAMEM2_METH_VERSION,
+             argv[0] ? argv[0] : "meth-postproc");
+    for (int i = 1; i < argc; ++i) ksprintf(&pg, " %s", argv[i]);
+    kputc('\n', &pg);
+    int rc = process_stream(stdin, stdout, NULL, set_as_failed, no_chim, pg.s);
+    free(pg.s);
+    return rc;
 }
