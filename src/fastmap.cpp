@@ -39,6 +39,7 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 #include <getopt.h>
 #include "fastmap.h"
 #include "FMI_search.h"
+#include "meth_bam.h"
 
 #if AFF && (__linux__)
 #include <sys/sysinfo.h>
@@ -345,8 +346,12 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
                                  0,
                                  w);
 
-                for (int i = 0; i < n_sep[0]; ++i)
-                    ret->seqs[sep[0][i].id].sam = sep[0][i].sam;
+                for (int i = 0; i < n_sep[0]; ++i) {
+                    ret->seqs[sep[0][i].id].sam          = sep[0][i].sam;
+                    ret->seqs[sep[0][i].id].meth_bams    = sep[0][i].meth_bams;
+                    ret->seqs[sep[0][i].id].meth_n_bams  = sep[0][i].meth_n_bams;
+                    ret->seqs[sep[0][i].id].meth_cap_bams= sep[0][i].meth_cap_bams;
+                }
             }
             if (n_sep[1]) {
                 tmp_opt.flag |= MEM_F_PE;
@@ -358,8 +363,12 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
                                  aux->pes0,
                                  w);
 
-                for (int i = 0; i < n_sep[1]; ++i)
-                    ret->seqs[sep[1][i].id].sam = sep[1][i].sam;
+                for (int i = 0; i < n_sep[1]; ++i) {
+                    ret->seqs[sep[1][i].id].sam          = sep[1][i].sam;
+                    ret->seqs[sep[1][i].id].meth_bams    = sep[1][i].meth_bams;
+                    ret->seqs[sep[1][i].id].meth_n_bams  = sep[1][i].meth_n_bams;
+                    ret->seqs[sep[1][i].id].meth_cap_bams= sep[1][i].meth_cap_bams;
+                }
             }
             free(sep[0]); free(sep[1]);
         }
@@ -382,15 +391,51 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
     {
         uint64_t tim = __rdtsc();
 
-        for (int i = 0; i < ret->n_seqs; ++i)
+        for (int i = 0; i < ret->n_seqs; )
         {
-            if (ret->seqs[i].sam) {
-                // err_fputs(ret->seqs[i].sam, stderr);
-                fputs(ret->seqs[i].sam, aux->fp);
+            int group_size = 1;
+            if (aux->opt->meth_mode && (aux->opt->flag & MEM_F_PE)
+                && i + 1 < ret->n_seqs
+                && strcmp(ret->seqs[i].name, ret->seqs[i+1].name) == 0) {
+                group_size = 2;
             }
-            free(ret->seqs[i].name); free(ret->seqs[i].comment);
-            free(ret->seqs[i].seq); free(ret->seqs[i].qual);
-            free(ret->seqs[i].sam);
+
+            if (aux->opt->meth_mode && g_meth_bam_writer != NULL) {
+                /* Gather all bam1_t* in the QNAME group, propagate QC fail, emit. */
+                int total = 0;
+                for (int k = 0; k < group_size; ++k) total += ret->seqs[i+k].meth_n_bams;
+                if (total > 0) {
+                    struct bam1_t **group = (struct bam1_t **)malloc(total * sizeof(struct bam1_t *));
+                    int idx = 0;
+                    for (int k = 0; k < group_size; ++k) {
+                        for (int j = 0; j < ret->seqs[i+k].meth_n_bams; ++j) {
+                            group[idx++] = (struct bam1_t *)ret->seqs[i+k].meth_bams[j];
+                        }
+                    }
+                    meth_bam_group_propagate_qcfail(group, total);
+                    for (int j = 0; j < total; ++j) {
+                        meth_bam_writer_write(g_meth_bam_writer, group[j]);
+                        meth_bam_free(group[j]);
+                    }
+                    free(group);
+                }
+            } else {
+                for (int k = 0; k < group_size; ++k) {
+                    if (ret->seqs[i+k].sam) {
+                        fputs(ret->seqs[i+k].sam, aux->fp);
+                    }
+                }
+            }
+
+            for (int k = 0; k < group_size; ++k) {
+                free(ret->seqs[i+k].name);
+                free(ret->seqs[i+k].comment);
+                free(ret->seqs[i+k].seq);
+                free(ret->seqs[i+k].qual);
+                free(ret->seqs[i+k].sam);
+                free(ret->seqs[i+k].meth_bams);
+            }
+            i += group_size;
         }
         free(ret->seqs);
         free(ret);
@@ -1053,7 +1098,26 @@ int main_mem(int argc, char *argv[])
         }
     }
 
-    bwa_print_sam_hdr(aux.fmi->idx->bns, hdr_line, aux.fp);
+    if (opt->meth_mode) {
+        g_meth_cmap = meth_chrom_map_build_from_bns(aux.fmi->idx->bns);
+        if (g_meth_cmap == NULL) {
+            fprintf(stderr, "ERROR: meth: failed to build chrom map\n");
+            free(opt); return 1;
+        }
+        const char *out_path = "-";
+        if (is_o) {
+            fflush(aux.fp); fclose(aux.fp); aux.fp = NULL;
+        }
+        extern char *bwa_pg;
+        g_meth_bam_writer = meth_bam_writer_open(out_path, g_meth_cmap, bwa_pg, NULL);
+        if (g_meth_bam_writer == NULL) {
+            fprintf(stderr, "ERROR: meth: failed to open BAM writer for '%s'\n", out_path);
+            meth_chrom_map_free(g_meth_cmap); g_meth_cmap = NULL;
+            free(opt); return 1;
+        }
+    } else {
+        bwa_print_sam_hdr(aux.fmi->idx->bns, hdr_line, aux.fp);
+    }
 
     if (fixed_chunk_size > 0)
         aux.task_size = fixed_chunk_size;
@@ -1070,6 +1134,9 @@ int main_mem(int argc, char *argv[])
 
     tprof[PROCESS][0] += __rdtsc() - tim;
 
+    /* Close meth BAM writer BEFORE free(opt) — opt->meth_mode is checked here. */
+    int meth_mode_local = opt->meth_mode;
+
     // free memory
     int32_t nt = aux.opt->n_threads;
     _mm_free(ref_string);
@@ -1084,7 +1151,13 @@ int main_mem(int argc, char *argv[])
         err_gzclose(fp2); kclose(ko2);
     }
 
-    if (is_o) {
+    if (meth_mode_local && g_meth_bam_writer != NULL) {
+        int rc = meth_bam_writer_close(g_meth_bam_writer);
+        if (rc != 0) fprintf(stderr, "[meth] WARNING: BAM writer close rc=%d\n", rc);
+        g_meth_bam_writer = NULL;
+        meth_chrom_map_free(g_meth_cmap);
+        g_meth_cmap = NULL;
+    } else if (is_o) {
         fclose(aux.fp);
     }
 

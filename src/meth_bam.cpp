@@ -1,14 +1,37 @@
 /* SPDX-License-Identifier: MIT */
-#include "meth_bam.h"
+
+/* htslib headers must come before any bwa-mem2 header that pulls in
+ * bwa-mem2's kstring.h (they share the KSTRING_H include guard). */
 #include "htslib/sam.h"
 #include "htslib/kstring.h"
+
+#include "meth_bam.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
+/* Private writer struct — opaque to callers via meth_bam.h. */
+struct meth_bam_writer_s {
+    htsFile          *fp;
+    sam_hdr_t        *hdr;
+    meth_chrom_map_t *cmap; /* non-owning */
+};
+
 /* Declared in src/bwa.h (without extern "C"); match that linkage here. */
 extern char bwa_rg_id[256];
+
+/* Globals (declared extern in meth_bam.h) */
+meth_bam_writer_t *g_meth_bam_writer = NULL;
+/* g_meth_cmap is defined in bwamem.cpp (so the worker hook can access it
+ * without a link dependency on meth_bam.cpp; both files see the header). */
+
+/* --- Allocation wrappers ------------------------------------------- */
+
+extern "C" {
+struct bam1_t *meth_bam_alloc(void) { return bam_init1(); }
+void meth_bam_free(struct bam1_t *b) { if (b) bam_destroy1(b); }
+}
 
 /* ------------------------------------------------------------------- */
 /* Chrom map                                                            */

@@ -3,10 +3,19 @@
 #define BWAMEM2_METH_BAM_H
 
 #include <stdint.h>
-#include "htslib/sam.h"
 #include "bwa.h"
 #include "bwamem.h"
 #include "bntseq.h"
+
+/* We cannot include <htslib/sam.h> here: bwa-mem2's src/kstring.h and
+ * htslib's htslib/kstring.h both use `KSTRING_H` as their include guard,
+ * so the second one to be included silently becomes a no-op and inline
+ * functions in htslib/sam.h that depend on htslib-specific kstring helpers
+ * (kputsn_, kputc_) fail to compile. To keep this header usable from
+ * bwamem.cpp (which pulls in bwa-mem2's kstring.h transitively), we
+ * forward-declare bam1_t and expose htslib-free wrapper entry points.
+ * The translation unit src/meth_bam.cpp is where htslib/sam.h is included. */
+struct bam1_t;
 
 /*
  * Native BAM emission for `bwa-mem2 mem --meth`.
@@ -39,11 +48,14 @@ void              meth_chrom_map_free(meth_chrom_map_t *m);
 
 /* --- BAM writer lifecycle ------------------------------------------- */
 
-typedef struct meth_bam_writer_s {
-    htsFile          *fp;       /* htslib output handle (wraps BGZF) */
-    sam_hdr_t        *hdr;      /* header with consolidated @SQ list */
-    meth_chrom_map_t *cmap;     /* non-owning pointer; caller frees */
-} meth_bam_writer_t;
+/* Opaque — defined in meth_bam.cpp so this header is htslib-free. */
+typedef struct meth_bam_writer_s meth_bam_writer_t;
+
+/* Global chrom map (set once by main_mem when --meth is active). */
+extern meth_chrom_map_t *g_meth_cmap;
+
+/* Global BAM writer (same lifecycle). */
+extern meth_bam_writer_t *g_meth_bam_writer;
 
 /* Open a BAM writer. `path_or_dash` is "-" for stdout or a filename.
  * Compression: "wb"=deflated, "wu"=uncompressed (BGZF level 0). We default
@@ -57,18 +69,26 @@ meth_bam_writer_t *meth_bam_writer_open(const char *path_or_dash,
                                         const char *meth_pg_cl);
 
 /* Write one bam1_t. Returns 0 on success, -1 on error. */
-int meth_bam_writer_write(meth_bam_writer_t *w, bam1_t *b);
+int meth_bam_writer_write(meth_bam_writer_t *w, struct bam1_t *b);
 
 /* Close the writer and flush the BGZF EOF marker. Frees internal hdr and
  * htsFile; does NOT free the cmap. Returns 0 on success, -1 on error. */
 int meth_bam_writer_close(meth_bam_writer_t *w);
 
+/* --- Allocation wrappers (keep htslib out of bwamem.cpp) ------------- */
+
+/* Allocate a new bam1_t (wraps bam_init1). */
+struct bam1_t *meth_bam_alloc(void);
+
+/* Free a bam1_t previously returned from meth_bam_alloc (wraps bam_destroy1). */
+void meth_bam_free(struct bam1_t *b);
+
 /* --- mem_aln_t -> bam1_t --------------------------------------------- */
 
 /*
  * Convert one alignment from bwa-mem2's internal representation into a
- * bam1_t. The caller owns `b` (allocate via bam_init1 once and reuse, or
- * allocate per-record).
+ * bam1_t. The caller owns `b` (allocate via meth_bam_alloc once and reuse,
+ * or allocate per-record).
  *
  * This function performs these meth transforms:
  *   - chrom rewrite: p->rid → cmap->out_tid[p->rid]
@@ -79,7 +99,7 @@ int meth_bam_writer_close(meth_bam_writer_t *w);
  *   - honors set_as_failed = 'f' or 'r' to force 0x200 on that strand
  *
  * Returns 0 on success, -1 on error. */
-int meth_mem_aln_to_bam(bam1_t *b,
+int meth_mem_aln_to_bam(struct bam1_t *b,
                         const mem_opt_t *opt, const bntseq_t *bns,
                         const bseq1_t *s, int n_alns,
                         const mem_aln_t *list, int which,
@@ -91,7 +111,7 @@ int meth_mem_aln_to_bam(bam1_t *b,
 /* Propagate 0x200 across an array of bam1_t*. If any record has 0x200,
  * set 0x200 and clear 0x2 on all others. Leaves mapq untouched (the
  * per-record chimera heuristic handled its own mapq cap). */
-void meth_bam_group_propagate_qcfail(bam1_t **group, int n);
+void meth_bam_group_propagate_qcfail(struct bam1_t **group, int n);
 
 #ifdef __cplusplus
 }
