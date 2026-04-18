@@ -152,6 +152,39 @@ The following are the highlights of the ert based bwa-mem2 tool:
 6. The code is present in ert branch: https://github.com/bwa-mem2/bwa-mem2/tree/ert
 
 
+## Bisulfite-Sequencing Mode (fork — experimental)
+
+This fork (`nh13/bwa-mem2`, branch `meth`) adds bisulfite-sequencing (BS-Seq) support. Currently implemented:
+
+### `bwa-mem2 meth-postproc`
+
+Native C++ replacement for `bwameth.py`'s post-processing stage. Reads SAM from stdin, writes SAM to stdout. Drops the single-threaded Python bottleneck from the classic `bwa-meth` pipeline — especially valuable on high-thread-count runs.
+
+Usage:
+```sh
+bwameth.py index-mem2 ref.fa
+bwameth.py c2t R1.fq.gz R2.fq.gz \
+  | bwa-mem2 mem -T 40 -B 2 -L 10 -CM -U 100 -p -t 16 ref.c2t.fasta /dev/stdin \
+  | bwa-mem2 meth-postproc \
+  | samtools sort -o out.bam
+samtools index out.bam
+```
+
+What it does (equivalent to `bwameth.py`'s `handle_header` + `as_bam` + `handle_reads`):
+- Strips `f`/`r` prefix from `@SQ SN:` and per-record `RNAME`/`RNEXT`; emits one `@SQ` per chrom.
+- Emits `YD:Z:{f,r}` (strand hypothesis) on each mapped record; strips any incoming `YS:Z`.
+- Chimera QC heuristic: if the longest `M`/`=`/`X` CIGAR run is under 44% of the read length, sets the `0x200` QC-fail flag, clears `0x2` (proper pair), and caps MAPQ at 1.
+- Pair-level QC-fail propagation: if any alignment in a QNAME group fails QC, the whole group inherits the fail.
+- Injects a `@PG ID:bwa-mem2-meth` entry.
+
+Options:
+- `--set-as-failed {f,r}` — flag alignments aligned to the given strand as QC-fail (`0x200`).
+- `--do-not-penalize-chimeras` — skip the longest-match < 44% chimera heuristic.
+
+### Roadmap
+
+`bwa-mem2 meth-index` + `bwa-mem2 meth` (a future PR) will add native BS-aware alignment with a single, non-doubled FMI (option #3 in the design doc) — eliminating the 2× reference overhead entirely. See `docs/superpowers/design/bwa-mem2-meth.md` for the full architecture.
+
 ## Citation
 
 Vasimuddin Md, Sanchit Misra, Heng Li, Srinivas Aluru.
