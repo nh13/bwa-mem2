@@ -154,36 +154,56 @@ The following are the highlights of the ert based bwa-mem2 tool:
 
 ## Bisulfite-Sequencing Mode (fork — experimental)
 
-This fork (`nh13/bwa-mem2`, branch `meth`) adds bisulfite-sequencing (BS-Seq) support. Currently implemented:
+This fork (`nh13/bwa-mem2`, branch `meth`) adds bisulfite-sequencing (BS-Seq) support, integrated directly into `bwa-mem2 mem`. When `--meth` is passed, the aligner runs `bwa-meth`-equivalent post-processing inline and emits uncompressed BAM via htslib — no external `bwameth.py` post-processing stage is needed.
 
-### `bwa-mem2 meth-postproc`
+### Usage
 
-Native C++ replacement for `bwameth.py`'s post-processing stage. Reads SAM from stdin, writes SAM to stdout. Drops the single-threaded Python bottleneck from the classic `bwa-meth` pipeline — especially valuable on high-thread-count runs.
-
-Usage:
+Build a `bwameth.py`-style doubled c2t reference (one-time; requires `bwameth.py` and `python`):
 ```sh
 bwameth.py index-mem2 ref.fa
+```
+
+Then align in a single command:
+```sh
 bwameth.py c2t R1.fq.gz R2.fq.gz \
-  | bwa-mem2 mem -T 40 -B 2 -L 10 -CM -U 100 -p -t 16 ref.c2t.fasta /dev/stdin \
-  | bwa-mem2 meth-postproc \
+  | bwa-mem2 mem --meth -T 40 -B 2 -L 10 -CM -U 100 -p -t 16 ref.c2t.fasta /dev/stdin \
   | samtools sort -o out.bam
 samtools index out.bam
 ```
 
-What it does (equivalent to `bwameth.py`'s `handle_header` + `as_bam` + `handle_reads`):
-- Strips `f`/`r` prefix from `@SQ SN:` and per-record `RNAME`/`RNEXT`; emits one `@SQ` per chrom.
-- Emits `YD:Z:{f,r}` (strand hypothesis) on each mapped record; strips any incoming `YS:Z`.
+### What `--meth` does (inline, during alignment)
+
+Applied to every record before it is emitted:
+- Strips the `f`/`r` prefix from `@SQ SN:` and per-record `RNAME`/`RNEXT`; emits one `@SQ` per real chromosome.
+- Emits `YD:Z:{f,r}` (strand hypothesis) on each mapped record.
 - Chimera QC heuristic: if the longest `M`/`=`/`X` CIGAR run is under 44% of the read length, sets the `0x200` QC-fail flag, clears `0x2` (proper pair), and caps MAPQ at 1.
 - Pair-level QC-fail propagation: if any alignment in a QNAME group fails QC, the whole group inherits the fail.
-- Injects a `@PG ID:bwa-mem2-meth` entry.
+- Adds a `@PG ID:bwa-mem2-meth` entry.
+- Output format switches from SAM text to uncompressed BAM (BGZF with `Z_NO_COMPRESSION`) — nearly free CPU cost, ~0.7% size overhead vs raw bytes, fully readable by `samtools`/`pysam`/`htslib`.
 
-Options:
+### Options (all long-form, added by the fork)
+
+- `--meth` — enable bisulfite-sequencing post-processing + BAM output.
 - `--set-as-failed {f,r}` — flag alignments aligned to the given strand as QC-fail (`0x200`).
 - `--do-not-penalize-chimeras` — skip the longest-match < 44% chimera heuristic.
 
+### Build notes
+
+This fork pulls in [htslib](https://github.com/samtools/htslib) as a git submodule (at `ext/htslib`, pinned to v1.21) for BAM I/O. htslib is configured with a minimal feature set (no lzma, no libcurl, no S3/GCS/plugins, no bz2) so the only runtime dependency remains zlib, which `bwa-mem2` already requires. The submodule is fetched and built automatically by `make`.
+
+Clone with submodules:
+```sh
+git clone --recursive --branch meth git@github.com:nh13/bwa-mem2.git
+```
+
+Or if you already cloned without `--recursive`:
+```sh
+git submodule update --init --recursive
+```
+
 ### Roadmap
 
-`bwa-mem2 meth-index` + `bwa-mem2 meth` (a future PR) will add native BS-aware alignment with a single, non-doubled FMI (option #3 in the design doc) — eliminating the 2× reference overhead entirely. See `docs/superpowers/design/bwa-mem2-meth.md` for the full architecture.
+`bwa-mem2 meth-index` + a native BS-aware alignment mode (a future PR) will eliminate the `bwameth.py` c2t doubling step by seeding against a single 3-letter FMI and doing C↔T-tolerant extension against the original reference. See `docs/superpowers/design/bwa-mem2-meth.md` for the full architecture.
 
 ## Citation
 
