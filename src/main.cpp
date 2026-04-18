@@ -30,6 +30,7 @@ Contacts: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@
 
 // ----------------------------------
 #include "main.h"
+#include "meth_index.h"
 
 #ifndef PACKAGE_VERSION
 #define PACKAGE_VERSION "2.2.1"
@@ -46,6 +47,7 @@ int usage()
     fprintf(stderr, "Commands:\n");
     fprintf(stderr, "  index         create index\n");
     fprintf(stderr, "  mem           alignment (add --meth for bisulfite-sequencing + BAM output)\n");
+    fprintf(stderr, "  meth-index    build a BS-aware FM-index (side-by-side with the normal index)\n");
     fprintf(stderr, "  version       print version number\n");
     return 1;
 }
@@ -107,6 +109,10 @@ int main(int argc, char* argv[])
     {
         puts(PACKAGE_VERSION);
         return 0;
+    }
+    else if (strcmp(argv[1], "meth-index") == 0)
+    {
+        return meth_index_main(argc-1, argv+1);
     } else {
         fprintf(stderr, "ERROR: unknown command '%s'\n", argv[1]);
         return 1;
