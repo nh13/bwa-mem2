@@ -7,3 +7,6 @@ t_R2.fastq.gz
 *.bam
 *.sorted.bam
 *.sorted.bam.bai
+# pixi environments
+.pixi/*
+!.pixi/config.toml
