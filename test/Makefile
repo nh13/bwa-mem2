@@ -29,7 +29,7 @@
 ##*****************************************************************************************/
 
 
-EXE=		fmi_test smem2_test bwt_seed_strategy_test sa2ref_test xeonbsw
+EXE=		fmi_test smem2_test bwt_seed_strategy_test sa2ref_test xeonbsw meth_postproc_test
 CXX=		icpc
 CXXFLAGS=	-std=c++11 -fopenmp -mtune=native -march=native
 CPPFLAGS=	-DENABLE_PREFETCH
@@ -59,6 +59,9 @@ bwt_seed_strategy_test:bwt_seed_strategy_test.o
 xeonbsw:main_banded.o
 	$(CXX) -o $@ $^ $(LIBS)
 
+meth_postproc_test: meth_postproc_test.o
+	$(CXX) -o $@ $^ $(LIBS)
+
 clean:
 	rm -fr *.o $(EXE)
 
@@ -74,3 +77,4 @@ sa2ref_test.o: ../src/FMI_search.h ../src/bntseq.h ../src/read_index_ele.h
 sa2ref_test.o: ../src/bwa.h ../src/bwt.h ../src/utils.h ../src/macro.h
 smem2_test.o: ../src/FMI_search.h ../src/bntseq.h ../src/read_index_ele.h
 smem2_test.o: ../src/bwa.h ../src/bwt.h ../src/utils.h ../src/macro.h
+meth_postproc_test.o: ../src/meth_postproc.h
