@@ -30,6 +30,7 @@ Contacts: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@
 
 // ----------------------------------
 #include "main.h"
+#include "meth_postproc.h"
 
 #ifndef PACKAGE_VERSION
 #define PACKAGE_VERSION "2.2.1"
@@ -47,6 +48,7 @@ int usage()
     fprintf(stderr, "  index         create index\n");
     fprintf(stderr, "  mem           alignment\n");
     fprintf(stderr, "  version       print version number\n");
+    fprintf(stderr, "  meth-postproc post-process bwa-meth-style SAM (BS-Seq)\n");
     return 1;
 }
 
@@ -107,6 +109,10 @@ int main(int argc, char* argv[])
     {
         puts(PACKAGE_VERSION);
         return 0;
+    }
+    else if (strcmp(argv[1], "meth-postproc") == 0)
+    {
+        return meth_postproc_main(argc-1, argv+1);
     } else {
         fprintf(stderr, "ERROR: unknown command '%s'\n", argv[1]);
         return 1;
