@@ -132,18 +132,6 @@ int meth_longest_m(const char *cigar)
     return longest;
 }
 
-static int usage(FILE *fp)
-{
-    fprintf(fp,
-        "Usage: bwa-mem2 meth-postproc [options] < in.sam > out.sam\n"
-        "\n"
-        "Options:\n"
-        "  --set-as-failed {f,r}       Flag reads aligned to this strand as QC-fail (0x200)\n"
-        "  --do-not-penalize-chimeras  Skip the longest-match <44%% chimera heuristic\n"
-        "  -h, --help                  Show this message\n");
-    return 1;
-}
-
 /* Apply group QC-fail propagation in-place on `group`. Each entry is a full
  * SAM line including trailing '\n'. */
 static void propagate_group_qcfail(std::vector<std::string> &group)
@@ -243,40 +231,5 @@ int meth_process_stream_from_string(const char *input, kstring_t *out,
     const char *pg = "@PG\tID:bwa-mem2-meth\tPN:bwa-mem2-meth\tVN:test\n";
     int rc = process_stream(fp, NULL, out, set_as_failed, no_chim, pg);
     fclose(fp);
-    return rc;
-}
-
-#ifndef BWAMEM2_METH_VERSION
-#define BWAMEM2_METH_VERSION "2.2.1-meth"
-#endif
-
-int meth_postproc_main(int argc, char *argv[])
-{
-    char set_as_failed = 0;
-    int no_chim = 0;
-    for (int i = 1; i < argc; ++i) {
-        if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
-            usage(stdout);
-            return 0;
-        } else if (strcmp(argv[i], "--set-as-failed") == 0 && i + 1 < argc) {
-            const char *v = argv[++i];
-            if ((v[0] == 'f' || v[0] == 'r') && v[1] == '\0') set_as_failed = v[0];
-            else { fprintf(stderr, "ERROR: --set-as-failed requires 'f' or 'r'\n"); return 2; }
-        } else if (strcmp(argv[i], "--do-not-penalize-chimeras") == 0) {
-            no_chim = 1;
-        } else {
-            fprintf(stderr, "ERROR: unknown option '%s'\n", argv[i]);
-            return usage(stderr);
-        }
-    }
-    /* Build @PG from argv */
-    kstring_t pg = {0, 0, NULL};
-    ksprintf(&pg, "@PG\tID:bwa-mem2-meth\tPN:bwa-mem2-meth\tVN:%s\tCL:%s",
-             BWAMEM2_METH_VERSION,
-             argv[0] ? argv[0] : "meth-postproc");
-    for (int i = 1; i < argc; ++i) ksprintf(&pg, " %s", argv[i]);
-    kputc('\n', &pg);
-    int rc = process_stream(stdin, stdout, NULL, set_as_failed, no_chim, pg.s);
-    free(pg.s);
     return rc;
 }

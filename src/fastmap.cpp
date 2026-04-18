@@ -36,6 +36,7 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 #include <numa.h>
 #endif
 #include <sstream>
+#include <getopt.h>
 #include "fastmap.h"
 #include "FMI_search.h"
 
@@ -722,7 +723,24 @@ int main_mem(int argc, char *argv[])
 
     /* Parse input arguments */
     // comment: added option '5' in the list
-    while ((c = getopt(argc, argv, "51qpaMCSPVYjk:c:v:s:r:t:R:A:B:O:E:U:w:L:d:T:Q:D:m:I:N:W:x:G:h:y:K:X:H:o:f:")) >= 0)
+    //
+    // Long-only options for bisulfite mode (bwa-mem2 meth fork):
+    //   --meth                      Enable BS-Seq post-processing + uncompressed BAM output
+    //   --set-as-failed f|r         Flag alignments to this strand as QC-fail (0x200)
+    //   --do-not-penalize-chimeras  Skip the longest-match <44% chimera heuristic
+    enum {
+        OPT_METH = 1000,
+        OPT_METH_SET_AS_FAILED,
+        OPT_METH_NO_CHIMERA,
+    };
+    static struct option long_opts[] = {
+        {"meth",                     no_argument,       0, OPT_METH},
+        {"set-as-failed",            required_argument, 0, OPT_METH_SET_AS_FAILED},
+        {"do-not-penalize-chimeras", no_argument,       0, OPT_METH_NO_CHIMERA},
+        {0, 0, 0, 0}
+    };
+    while ((c = getopt_long(argc, argv, "51qpaMCSPVYjk:c:v:s:r:t:R:A:B:O:E:U:w:L:d:T:Q:D:m:I:N:W:x:G:h:y:K:X:H:o:f:",
+                            long_opts, NULL)) >= 0)
     {
         if (c == 'k') opt->min_seed_len = atoi(optarg), opt0.min_seed_len = 1;
         else if (c == '1') no_mt_io = 1;
@@ -838,6 +856,21 @@ int main_mem(int argc, char *argv[])
                     fclose(fp);
                 }
             } else hdr_line = bwa_insert_header(optarg, hdr_line);
+        }
+        else if (c == OPT_METH) {
+            opt->meth_mode = 1;
+        }
+        else if (c == OPT_METH_SET_AS_FAILED) {
+            if (optarg == NULL || !(optarg[0] == 'f' || optarg[0] == 'r') || optarg[1] != '\0') {
+                fprintf(stderr, "ERROR: --set-as-failed requires 'f' or 'r'\n");
+                free(opt);
+                if (is_o) fclose(aux.fp);
+                return 1;
+            }
+            opt->meth_set_as_failed = optarg[0];
+        }
+        else if (c == OPT_METH_NO_CHIMERA) {
+            opt->meth_no_chim = 1;
         }
         else if (c == 'I')
         {
