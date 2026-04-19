@@ -31,6 +31,27 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 #include "bwamem.h"
 #include "FMI_search.h"
 #include "memcpy_bwamem.h"
+#include "meth_bam.h"
+/* Intentionally NOT including <htslib/sam.h> here: bwa-mem2's and htslib's
+ * kstring.h share the KSTRING_H include guard. We use opaque wrappers
+ * (meth_bam_alloc / meth_bam_free) declared in meth_bam.h. */
+
+/* Chromosome map for --meth mode. Set once by main_mem before alignment starts
+ * and read-only thereafter — safe for concurrent worker access. */
+meth_chrom_map_t *g_meth_cmap = NULL;
+
+/* Append a bam1_t* to s->meth_bams (grows the array as needed). */
+static inline void meth_push_bam(bseq1_t *s, struct bam1_t *b)
+{
+    if (s->meth_n_bams == s->meth_cap_bams) {
+        int new_cap = s->meth_cap_bams ? s->meth_cap_bams * 2 : 4;
+        void **tmp = (void **)realloc(s->meth_bams, (size_t)new_cap * sizeof(void *));
+        if (tmp == NULL) { meth_bam_free(b); return; }
+        s->meth_bams     = tmp;
+        s->meth_cap_bams = new_cap;
+    }
+    s->meth_bams[s->meth_n_bams++] = b;
+}
 
 //----------------
 extern uint64_t tprof[LIM_R][LIM_C];
@@ -1592,6 +1613,19 @@ static inline void add_cigar(const mem_opt_t *opt, mem_aln_t *p, kstring_t *str,
 void mem_aln2sam(const mem_opt_t *opt, const bntseq_t *bns, kstring_t *str,
                  bseq1_t *s, int n, const mem_aln_t *list, int which, const mem_aln_t *m_)
 {
+    /* --- meth mode: produce a bam1_t directly instead of SAM text --- */
+    if (opt->meth_mode && g_meth_cmap != NULL) {
+        struct bam1_t *b = meth_bam_alloc();
+        if (b != NULL) {
+            if (meth_mem_aln_to_bam(b, opt, bns, s, n, list, which, m_, g_meth_cmap) == 0) {
+                meth_push_bam(s, b);
+            } else {
+                meth_bam_free(b);
+            }
+        }
+        return;
+    }
+
     int i, l_name;
     mem_aln_t ptmp = list[which], *p = &ptmp, mtmp, *m = 0; // make a copy of the alignment to convert
 

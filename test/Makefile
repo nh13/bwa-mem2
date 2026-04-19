@@ -29,12 +29,24 @@
 ##*****************************************************************************************/
 
 
-EXE=		fmi_test smem2_test bwt_seed_strategy_test sa2ref_test xeonbsw
-CXX=		icpc
-CXXFLAGS=	-std=c++11 -fopenmp -mtune=native -march=native
+EXE=		fmi_test smem2_test bwt_seed_strategy_test sa2ref_test xeonbsw meth_postproc_test
+
+# On Apple Silicon (and any non-icpc host), use the system compiler and drop
+# -fopenmp / -march=native. Override with `make CXX=icpc` to restore the
+# original Intel toolchain configuration.
+UNAME_M := $(shell uname -m)
+ifeq ($(UNAME_M),arm64)
+    CXX ?=      clang++
+    CXXFLAGS ?= -std=c++11 -O2
+    LIBS ?=     -L.. -lz -lbwa ../ext/safestringlib/libsafestring.a
+else
+    CXX ?=      icpc
+    CXXFLAGS ?= -std=c++11 -fopenmp -mtune=native -march=native
+    LIBS ?=     -L.. -fopenmp -lz -lbwa ../ext/safestringlib/libsafestring.a
+endif
+
 CPPFLAGS=	-DENABLE_PREFETCH
-INCLUDES=	-I../src
-LIBS=		-L.. -fopenmp -lz -lbwa ../ext/safestringlib/libsafestring.a
+INCLUDES=	-I../src -I../ext/safestringlib/include
 
 .PHONY:all clean depend
 .SUFFIXES:.cpp .o
@@ -59,6 +71,9 @@ bwt_seed_strategy_test:bwt_seed_strategy_test.o
 xeonbsw:main_banded.o
 	$(CXX) -o $@ $^ $(LIBS)
 
+meth_postproc_test: meth_postproc_test.o
+	$(CXX) -o $@ $^ $(LIBS)
+
 clean:
 	rm -fr *.o $(EXE)
 
@@ -74,3 +89,4 @@ sa2ref_test.o: ../src/FMI_search.h ../src/bntseq.h ../src/read_index_ele.h
 sa2ref_test.o: ../src/bwa.h ../src/bwt.h ../src/utils.h ../src/macro.h
 smem2_test.o: ../src/FMI_search.h ../src/bntseq.h ../src/read_index_ele.h
 smem2_test.o: ../src/bwa.h ../src/bwt.h ../src/utils.h ../src/macro.h
+meth_postproc_test.o: ../src/meth_postproc.h

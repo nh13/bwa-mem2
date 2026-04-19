@@ -64,14 +64,15 @@ endif
 
 MEM_FLAGS=	-DSAIS=1
 CPPFLAGS+=	-DENABLE_PREFETCH -DV17=1 -DMATE_SORT=0 $(MEM_FLAGS)
-INCLUDES+=   -Isrc -Iext/safestringlib/include
-LIBS=		-lpthread -lm -lz -L. -lbwa -Lext/safestringlib -lsafestring $(STATIC_GCC) $(LIBS_EXTRA)
+INCLUDES+=   -Isrc -Iext/safestringlib/include -Iext/htslib
+LIBS=		-lpthread -lm -lz -L. -lbwa -Lext/safestringlib -lsafestring -Lext/htslib -lhts $(STATIC_GCC) $(LIBS_EXTRA)
 OBJS=		src/fastmap.o src/bwtindex.o src/utils.o src/memcpy_bwamem.o src/kthread.o \
 			src/kstring.o src/ksw.o src/bntseq.o src/bwamem.o src/profiling.o src/bandedSWA.o \
 			src/FMI_search.o src/read_index_ele.o src/bwamem_pair.o src/kswv.o src/bwa.o \
-			src/bwamem_extra.o src/kopen.o
+			src/bwamem_extra.o src/kopen.o src/meth_postproc.o src/meth_bam.o
 BWA_LIB=    libbwa.a
 SAFE_STR_LIB=    ext/safestringlib/libsafestring.a
+HTS_LIB=    ext/htslib/libhts.a
 
 # Architecture-specific builds (x86 only, ARM uses default from above)
 ifneq ($(UNAME_M),arm64)
@@ -159,11 +160,18 @@ arm64:
 	ln -sf bwa-mem2.arm64 bwa-mem2
 
 
-$(EXE):$(BWA_LIB) $(SAFE_STR_LIB) src/main.o
+$(EXE):$(BWA_LIB) $(SAFE_STR_LIB) $(HTS_LIB) src/main.o
 	$(CXX) $(CXXFLAGS) $(LDFLAGS) src/main.o $(BWA_LIB) $(LIBS) -o $@
 
 $(BWA_LIB):$(OBJS)
 	ar rcs $(BWA_LIB) $(OBJS)
+
+$(HTS_LIB):
+	cd ext/htslib && \
+	    ([ -f Makefile ] || (autoreconf -i && \
+	        ./configure --disable-lzma --disable-libcurl --disable-gcs \
+	                    --disable-s3 --disable-plugins --disable-bz2)) && \
+	    $(MAKE) libhts.a
 
 # On macOS, safestringlib needs stdlib.h for abort() and the memset_s
 # declaration conflicts with macOS C11 Annex K (different signature).
@@ -178,6 +186,7 @@ $(SAFE_STR_LIB):
 clean:
 	rm -fr src/*.o $(BWA_LIB) $(EXE) bwa-mem2.sse41 bwa-mem2.sse42 bwa-mem2.avx bwa-mem2.avx2 bwa-mem2.avx512bw bwa-mem2.arm64
 	cd ext/safestringlib/ && $(MAKE) clean
+	-[ -f ext/htslib/Makefile ] && cd ext/htslib && $(MAKE) clean
 
 # Profile-Guided Optimization (PGO) targets for Apple Silicon
 # Usage: make pgo-generate && <run training workload> && make pgo-use
@@ -241,3 +250,5 @@ src/read_index_ele.o: src/read_index_ele.h src/utils.h src/bntseq.h
 src/read_index_ele.o: src/macro.h
 src/utils.o: src/utils.h src/ksort.h src/kseq.h
 src/memcpy_bwamem.o: src/memcpy_bwamem.h
+src/meth_postproc.o: src/meth_postproc.h
+src/meth_bam.o: src/meth_bam.h src/bwamem.h src/bwa.h src/bntseq.h src/meth_postproc.h

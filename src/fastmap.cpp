@@ -36,8 +36,10 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 #include <numa.h>
 #endif
 #include <sstream>
+#include <getopt.h>
 #include "fastmap.h"
 #include "FMI_search.h"
+#include "meth_bam.h"
 
 #if AFF && (__linux__)
 #include <sys/sysinfo.h>
@@ -296,6 +298,40 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
                 ret->seqs[i].comment = 0;
             }
         }
+
+        /* Inline bwameth-style c2t conversion on read ingest. Matches
+         * `bwameth.py c2t R1.fq R2.fq`: even-index reads (R1) get C→T,
+         * odd-index reads (R2) get G→A. The original sequence is stashed
+         * as a YS:Z comment tag and the conversion type as YC:Z — these
+         * pass through to SAM via copy_comment (which --meth sets). */
+        if (aux->opt->meth_mode) {
+            int is_pe = (aux->opt->flag & MEM_F_PE) != 0;
+            for (int i = 0; i < ret->n_seqs; ++i) {
+                bseq1_t *s = &ret->seqs[i];
+                int is_r2 = is_pe && (i & 1);
+                const char *yc = is_r2 ? "GA" : "CT";
+                char from = is_r2 ? 'G' : 'C';
+                char from_lo = is_r2 ? 'g' : 'c';
+                char to   = is_r2 ? 'A' : 'T';
+                int l = s->l_seq;
+                /* Build the YS:Z/YC:Z comment now, replacing any prior
+                 * comment (which we'd otherwise propagate into SAM). */
+                size_t yslen = (size_t)l + 32;
+                char *comment = (char *)malloc(yslen);
+                assert(comment != NULL);
+                int off = snprintf(comment, yslen, "YS:Z:");
+                memcpy(comment + off, s->seq, (size_t)l);
+                off += l;
+                off += snprintf(comment + off, yslen - off, "\tYC:Z:%s", yc);
+                free(s->comment);
+                s->comment = comment;
+                /* Project in place. */
+                for (int j = 0; j < l; ++j) {
+                    char c = s->seq[j];
+                    if (c == from || c == from_lo) s->seq[j] = to;
+                }
+            }
+        }
         {
             int64_t size = 0;
             for (int i = 0; i < ret->n_seqs; ++i) size += ret->seqs[i].l_seq;
@@ -344,8 +380,12 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
                                  0,
                                  w);
 
-                for (int i = 0; i < n_sep[0]; ++i)
-                    ret->seqs[sep[0][i].id].sam = sep[0][i].sam;
+                for (int i = 0; i < n_sep[0]; ++i) {
+                    ret->seqs[sep[0][i].id].sam          = sep[0][i].sam;
+                    ret->seqs[sep[0][i].id].meth_bams    = sep[0][i].meth_bams;
+                    ret->seqs[sep[0][i].id].meth_n_bams  = sep[0][i].meth_n_bams;
+                    ret->seqs[sep[0][i].id].meth_cap_bams= sep[0][i].meth_cap_bams;
+                }
             }
             if (n_sep[1]) {
                 tmp_opt.flag |= MEM_F_PE;
@@ -357,8 +397,12 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
                                  aux->pes0,
                                  w);
 
-                for (int i = 0; i < n_sep[1]; ++i)
-                    ret->seqs[sep[1][i].id].sam = sep[1][i].sam;
+                for (int i = 0; i < n_sep[1]; ++i) {
+                    ret->seqs[sep[1][i].id].sam          = sep[1][i].sam;
+                    ret->seqs[sep[1][i].id].meth_bams    = sep[1][i].meth_bams;
+                    ret->seqs[sep[1][i].id].meth_n_bams  = sep[1][i].meth_n_bams;
+                    ret->seqs[sep[1][i].id].meth_cap_bams= sep[1][i].meth_cap_bams;
+                }
             }
             free(sep[0]); free(sep[1]);
         }
@@ -381,15 +425,51 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
     {
         uint64_t tim = __rdtsc();
 
-        for (int i = 0; i < ret->n_seqs; ++i)
+        for (int i = 0; i < ret->n_seqs; )
         {
-            if (ret->seqs[i].sam) {
-                // err_fputs(ret->seqs[i].sam, stderr);
-                fputs(ret->seqs[i].sam, aux->fp);
+            int group_size = 1;
+            if (aux->opt->meth_mode && (aux->opt->flag & MEM_F_PE)
+                && i + 1 < ret->n_seqs
+                && strcmp(ret->seqs[i].name, ret->seqs[i+1].name) == 0) {
+                group_size = 2;
             }
-            free(ret->seqs[i].name); free(ret->seqs[i].comment);
-            free(ret->seqs[i].seq); free(ret->seqs[i].qual);
-            free(ret->seqs[i].sam);
+
+            if (aux->opt->meth_mode && g_meth_bam_writer != NULL) {
+                /* Gather all bam1_t* in the QNAME group, propagate QC fail, emit. */
+                int total = 0;
+                for (int k = 0; k < group_size; ++k) total += ret->seqs[i+k].meth_n_bams;
+                if (total > 0) {
+                    struct bam1_t **group = (struct bam1_t **)malloc(total * sizeof(struct bam1_t *));
+                    int idx = 0;
+                    for (int k = 0; k < group_size; ++k) {
+                        for (int j = 0; j < ret->seqs[i+k].meth_n_bams; ++j) {
+                            group[idx++] = (struct bam1_t *)ret->seqs[i+k].meth_bams[j];
+                        }
+                    }
+                    meth_bam_group_propagate_qcfail(group, total);
+                    for (int j = 0; j < total; ++j) {
+                        meth_bam_writer_write(g_meth_bam_writer, group[j]);
+                        meth_bam_free(group[j]);
+                    }
+                    free(group);
+                }
+            } else {
+                for (int k = 0; k < group_size; ++k) {
+                    if (ret->seqs[i+k].sam) {
+                        fputs(ret->seqs[i+k].sam, aux->fp);
+                    }
+                }
+            }
+
+            for (int k = 0; k < group_size; ++k) {
+                free(ret->seqs[i+k].name);
+                free(ret->seqs[i+k].comment);
+                free(ret->seqs[i+k].seq);
+                free(ret->seqs[i+k].qual);
+                free(ret->seqs[i+k].sam);
+                free(ret->seqs[i+k].meth_bams);
+            }
+            i += group_size;
         }
         free(ret->seqs);
         free(ret);
@@ -722,7 +802,25 @@ int main_mem(int argc, char *argv[])
 
     /* Parse input arguments */
     // comment: added option '5' in the list
-    while ((c = getopt(argc, argv, "51qpaMCSPVYjk:c:v:s:r:t:R:A:B:O:E:U:w:L:d:T:Q:D:m:I:N:W:x:G:h:y:K:X:H:o:f:")) >= 0)
+    //
+    // Long-only options for bisulfite mode (bwa-mem2 meth fork):
+    //   --meth                      Enable inline bwameth-style c2t + post-processing + BAM output.
+    //                               Expects a reference built with `bwa-mem2 index --meth`.
+    //   --set-as-failed f|r         Flag alignments to this strand as QC-fail (0x200)
+    //   --do-not-penalize-chimeras  Skip the longest-match <44% chimera heuristic
+    enum {
+        OPT_METH = 1000,
+        OPT_METH_SET_AS_FAILED,
+        OPT_METH_NO_CHIMERA,
+    };
+    static struct option long_opts[] = {
+        {"meth",                     no_argument,       0, OPT_METH},
+        {"set-as-failed",            required_argument, 0, OPT_METH_SET_AS_FAILED},
+        {"do-not-penalize-chimeras", no_argument,       0, OPT_METH_NO_CHIMERA},
+        {0, 0, 0, 0}
+    };
+    while ((c = getopt_long(argc, argv, "51qpaMCSPVYjk:c:v:s:r:t:R:A:B:O:E:U:w:L:d:T:Q:D:m:I:N:W:x:G:h:y:K:X:H:o:f:",
+                            long_opts, NULL)) >= 0)
     {
         if (c == 'k') opt->min_seed_len = atoi(optarg), opt0.min_seed_len = 1;
         else if (c == '1') no_mt_io = 1;
@@ -839,6 +937,21 @@ int main_mem(int argc, char *argv[])
                 }
             } else hdr_line = bwa_insert_header(optarg, hdr_line);
         }
+        else if (c == OPT_METH) {
+            opt->meth_mode = 1;
+        }
+        else if (c == OPT_METH_SET_AS_FAILED) {
+            if (optarg == NULL || !(optarg[0] == 'f' || optarg[0] == 'r') || optarg[1] != '\0') {
+                fprintf(stderr, "ERROR: --set-as-failed requires 'f' or 'r'\n");
+                free(opt);
+                if (is_o) fclose(aux.fp);
+                return 1;
+            }
+            opt->meth_set_as_failed = optarg[0];
+        }
+        else if (c == OPT_METH_NO_CHIMERA) {
+            opt->meth_no_chim = 1;
+        }
         else if (c == 'I')
         {
             aux.pes0 = pes;
@@ -924,14 +1037,53 @@ int main_mem(int argc, char *argv[])
         }
     } else update_a(opt, &opt0);
 
+    /* Meth-mode default tuning. bwameth.py runs bwa-mem2 with
+     * -B 2 -L 10 -U 100 -T 40 -CM — these reduce mismatch and soft-clip
+     * penalties so BS reads get long un-clipped alignments, raise the
+     * output score threshold, mark shorter hits as secondary, and
+     * pass the YS/YC comment tags through to SAM. We apply the same
+     * defaults when --meth is set, modulo explicit CLI overrides. */
+    if (opt->meth_mode) {
+        if (!opt0.b)            opt->b           = 2;
+        if (!opt0.pen_clip5)    opt->pen_clip5   = 10;
+        if (!opt0.pen_clip3)    opt->pen_clip3   = 10;
+        if (!opt0.pen_unpaired) opt->pen_unpaired= 100;
+        if (!opt0.T)            opt->T           = 40;
+        opt->flag |= MEM_F_NO_MULTI;   /* -M */
+        aux.copy_comment = 1;          /* -C, needed for YS:Z/YC:Z passthrough */
+    }
+
     /* Matrix for SWA */
     bwa_fill_scmat(opt->a, opt->b, opt->mat);
+
+    /* In --meth the canonical UX is "bwa-mem2 mem --meth ref.fa" and
+     * we auto-append ".bwameth.c2t" to find the index built by
+     * "bwa-mem2 index --meth". If the user (or bwameth.py's internal
+     * invocation) already passed the ".bwameth.c2t" path directly, use
+     * it as-is rather than double-appending. */
+    char c2t_ref[PATH_MAX];
+    const char *ref_prefix = argv[optind];
+    if (opt->meth_mode) {
+        const char *suffix = ".bwameth.c2t";
+        size_t slen = strlen(suffix);
+        size_t alen = strlen(argv[optind]);
+        int already_c2t = (alen >= slen) &&
+                          (strcmp(argv[optind] + alen - slen, suffix) == 0);
+        if (!already_c2t) {
+            int n = snprintf(c2t_ref, sizeof(c2t_ref), "%s%s", argv[optind], suffix);
+            if (n <= 0 || (size_t)n >= sizeof(c2t_ref)) {
+                fprintf(stderr, "ERROR: ref path too long for --meth\n");
+                exit(EXIT_FAILURE);
+            }
+            ref_prefix = c2t_ref;
+        }
+    }
 
     /* Load bwt2/FMI index */
     uint64_t tim = __rdtsc();
 
-    fprintf(stderr, "* Ref file: %s\n", argv[optind]);
-    aux.fmi = new FMI_search(argv[optind]);
+    fprintf(stderr, "* Ref file: %s\n", ref_prefix);
+    aux.fmi = new FMI_search(ref_prefix);
     aux.fmi->load_index();
     tprof[FMI][0] += __rdtsc() - tim;
 
@@ -940,7 +1092,7 @@ int main_mem(int argc, char *argv[])
     fprintf(stderr, "* Reading reference genome..\n");
 
     char binary_seq_file[PATH_MAX];
-    strcpy_s(binary_seq_file, PATH_MAX, argv[optind]);
+    strcpy_s(binary_seq_file, PATH_MAX, ref_prefix);
     strcat_s(binary_seq_file, PATH_MAX, ".0123");
     //sprintf(binary_seq_file, "%s.0123", argv[optind]);
 
@@ -1020,7 +1172,26 @@ int main_mem(int argc, char *argv[])
         }
     }
 
-    bwa_print_sam_hdr(aux.fmi->idx->bns, hdr_line, aux.fp);
+    if (opt->meth_mode) {
+        g_meth_cmap = meth_chrom_map_build_from_bns(aux.fmi->idx->bns);
+        if (g_meth_cmap == NULL) {
+            fprintf(stderr, "ERROR: meth: failed to build chrom map\n");
+            free(opt); return 1;
+        }
+        const char *out_path = "-";
+        if (is_o) {
+            fflush(aux.fp); fclose(aux.fp); aux.fp = NULL;
+        }
+        extern char *bwa_pg;
+        g_meth_bam_writer = meth_bam_writer_open(out_path, g_meth_cmap, bwa_pg, NULL);
+        if (g_meth_bam_writer == NULL) {
+            fprintf(stderr, "ERROR: meth: failed to open BAM writer for '%s'\n", out_path);
+            meth_chrom_map_free(g_meth_cmap); g_meth_cmap = NULL;
+            free(opt); return 1;
+        }
+    } else {
+        bwa_print_sam_hdr(aux.fmi->idx->bns, hdr_line, aux.fp);
+    }
 
     if (fixed_chunk_size > 0)
         aux.task_size = fixed_chunk_size;
@@ -1037,6 +1208,9 @@ int main_mem(int argc, char *argv[])
 
     tprof[PROCESS][0] += __rdtsc() - tim;
 
+    /* Close meth BAM writer BEFORE free(opt) — opt->meth_mode is checked here. */
+    int meth_mode_local = opt->meth_mode;
+
     // free memory
     int32_t nt = aux.opt->n_threads;
     _mm_free(ref_string);
@@ -1051,7 +1225,13 @@ int main_mem(int argc, char *argv[])
         err_gzclose(fp2); kclose(ko2);
     }
 
-    if (is_o) {
+    if (meth_mode_local && g_meth_bam_writer != NULL) {
+        int rc = meth_bam_writer_close(g_meth_bam_writer);
+        if (rc != 0) fprintf(stderr, "[meth] WARNING: BAM writer close rc=%d\n", rc);
+        g_meth_bam_writer = NULL;
+        meth_chrom_map_free(g_meth_cmap);
+        g_meth_cmap = NULL;
+    } else if (is_o) {
         fclose(aux.fp);
     }
 

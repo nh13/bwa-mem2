@@ -105,6 +105,9 @@ typedef struct mem_opt_t {
     int max_matesw;         // perform maximally max_matesw rounds of mate-SW for each end
     int max_XA_hits, max_XA_hits_alt; // if there are max_hits or fewer, output them all
     int8_t mat[25];         // scoring matrix; mat[0] == 0 if unset
+    int meth_mode;          // bisulfite-sequencing mode: enable --meth inline c2t + post-processing + BAM output (0/1)
+    char meth_set_as_failed;// 'f', 'r', or 0: alignments to this strand get 0x200 (QC fail)
+    int meth_no_chim;       // 1 to skip the longest-M <44% chimera heuristic
 } mem_opt_t;
 
 
@@ -229,7 +232,7 @@ typedef struct worker_t {
     uint8_t          *ref_string;
     int16_t           nthreads;
     int32_t           nreads;
-    FMI_search       *fmi;  
+    FMI_search       *fmi;
 } worker_t;
 
 

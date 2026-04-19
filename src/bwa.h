@@ -59,6 +59,12 @@ typedef struct {
 typedef struct {
 	int l_seq, id;
 	char *name, *comment, *seq, *qual, *sam;
+	/* bwa-mem2 meth: per-seq list of bam1_t* (populated when opt->meth_mode).
+	 * Typed as void* here to avoid pulling in htslib from this header;
+	 * src/meth_bam.h declares the full type. */
+	void **meth_bams;
+	int    meth_n_bams;
+	int    meth_cap_bams;
 } bseq1_t;
 
 extern int bwa_verbose;

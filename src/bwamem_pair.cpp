@@ -504,12 +504,22 @@ int mem_sam_pe(const mem_opt_t *opt, const bntseq_t *bns,
         }
         for (i = 0; i < n_aa[0]; ++i)
             mem_aln2sam(opt, bns, &str, &s[0], n_aa[0], aa[0], i, &h[1]); // write read1 hits
-        
-        assert(str.s != 0);
-        s[0].sam = strdup(str.s); str.l = 0;
-        for (i = 0; i < n_aa[1]; ++i)
-            mem_aln2sam(opt, bns, &str, &s[1], n_aa[1], aa[1], i, &h[0]); // write read2 hits
-        s[1].sam = str.s;
+
+        if (opt->meth_mode) {
+            /* meth mode: mem_aln2sam sent records into s[0].meth_bams, not str. */
+            s[0].sam = NULL;
+            str.l = 0;
+            for (i = 0; i < n_aa[1]; ++i)
+                mem_aln2sam(opt, bns, &str, &s[1], n_aa[1], aa[1], i, &h[0]);
+            s[1].sam = NULL;
+            free(str.s); str.s = NULL; str.m = 0;
+        } else {
+            assert(str.s != 0);
+            s[0].sam = strdup(str.s); str.l = 0;
+            for (i = 0; i < n_aa[1]; ++i)
+                mem_aln2sam(opt, bns, &str, &s[1], n_aa[1], aa[1], i, &h[0]); // write read2 hits
+            s[1].sam = str.s;
+        }
         if (strcmp(s[0].name, s[1].name) != 0) err_fatal(__func__, "paired reads have different names: \"%s\", \"%s\"\n", s[0].name, s[1].name);
         // free
         for (i = 0; i < 2; ++i) {
