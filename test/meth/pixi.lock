@@ -26,7 +26,6 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/tzdata-2025c-hc9c84f9_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/zstd-1.5.7-hbf9d68e_6.conda
       - pypi: https://files.pythonhosted.org/packages/e0/8f/637fc7ba68b277ee0c5cbd5368f14a752b2d2df3131c6cd439d309887f24/toolshed-0.4.8-py3-none-any.whl
-      - pypi: ./
 packages:
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/bzip2-1.0.8-hd037594_9.conda
   sha256: 540fe54be35fac0c17feefbdc3e29725cce05d7367ffedfaaa1bdda234b019df
@@ -112,13 +111,6 @@ packages:
   purls: []
   size: 47759
   timestamp: 1774072956767
-- pypi: ./
-  name: meth
-  version: 0.1.0
-  sha256: 9daf6e3e87a9896a82d693a5d97628bf8faa91edd092f7e29302fdcd5a31aa69
-  requires_dist:
-  - toolshed>=0.4.8,<0.5
-  requires_python: '>=3.11'
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/ncurses-6.5-h5e97a16_3.conda
   sha256: 2827ada40e8d9ca69a153a45f7fd14f32b2ead7045d3bbb5d10964898fe65733
   md5: 068d497125e4bf8a66bf707254fff5ae
