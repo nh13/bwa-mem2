@@ -201,9 +201,40 @@ Or if you already cloned without `--recursive`:
 git submodule update --init --recursive
 ```
 
-### Roadmap
+### Native BS alignment: `bwa-mem2 meth-index` + `bwa-mem2 meth`
 
-`bwa-mem2 meth-index` + a native BS-aware alignment mode (a future PR) will eliminate the `bwameth.py` c2t doubling step by seeding against a single 3-letter FMI and doing C↔T-tolerant extension against the original reference. See `docs/superpowers/design/bwa-mem2-meth.md` for the full architecture.
+As an alternative to the bwameth.py c2t-doubled-reference flow, the fork
+also ships a **native** BS-aware path that seeds against a single 3-letter
+C→T-projected FM-index (half the memory of the doubled reference) and
+extends against the original 4-letter reference.
+
+Build the BS-aware index alongside the normal one (one-time):
+```sh
+bwa-mem2 meth-index ref.fa
+# → ref.fa.{pac,ann,amb,0123,bwt.2bit.64}     (normal index, unchanged)
+# → ref.fa.meth.{0123,bwt.2bit.64}            (BS-aware 3-letter FMI)
+```
+
+Align BS-seq reads natively (no external `bwameth.py` or c2t doubling):
+```sh
+bwa-mem2 meth -t 16 ref.fa R1.fq.gz R2.fq.gz \
+  | samtools sort -o out.bam
+samtools index out.bam
+```
+
+The `meth` subcommand auto-enables `--meth` + `--meth-index` — loading the
+`.meth.*` FMI for seeding while keeping the original `.pac`/`.ann`/`.amb`
+for bns lookups and extension. Output is uncompressed BAM with the same
+YD:Z, chimera QC, and QC-fail propagation as the doubled-ref path.
+
+**Status:** Phase C (OT hypothesis, C→T read projection) is wired and
+passes structural regression tests on the `bwa-meth/example/` fixture.
+The OB (G→A) hypothesis is a follow-up — for directional BS-Seq
+libraries (the typical case and bwameth.py's default for R1) the OT
+path reaches methylation-call parity on most reads. Output records for
+now all carry `YD:Z:f`; once OB lands the subset from Crick-sourced
+reads will flip to `YD:Z:r`. See `docs/superpowers/design/bwa-mem2-meth.md`
+for the full architecture.
 
 ## Citation
 
