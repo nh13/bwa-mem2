@@ -30,7 +30,6 @@ Contacts: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@
 
 // ----------------------------------
 #include "main.h"
-#include "meth_index.h"
 
 #ifndef PACKAGE_VERSION
 #define PACKAGE_VERSION "2.2.1"
@@ -45,10 +44,8 @@ int usage()
 {
     fprintf(stderr, "Usage: bwa-mem2 <command> <arguments>\n");
     fprintf(stderr, "Commands:\n");
-    fprintf(stderr, "  index         create index\n");
-    fprintf(stderr, "  mem           alignment (add --meth for bisulfite-sequencing + BAM output)\n");
-    fprintf(stderr, "  meth-index    build a BS-aware FM-index (side-by-side with the normal index)\n");
-    fprintf(stderr, "  meth          align BS-seq reads natively (auto-enables --meth + --meth-index)\n");
+    fprintf(stderr, "  index         create index (add --meth to build a bwameth-style doubled c2t reference)\n");
+    fprintf(stderr, "  mem           alignment (add --meth for bisulfite-seq: inline c2t + BAM output)\n");
     fprintf(stderr, "  version       print version number\n");
     return 1;
 }
@@ -110,26 +107,6 @@ int main(int argc, char* argv[])
     {
         puts(PACKAGE_VERSION);
         return 0;
-    }
-    else if (strcmp(argv[1], "meth-index") == 0)
-    {
-        return meth_index_main(argc-1, argv+1);
-    }
-    else if (strcmp(argv[1], "meth") == 0)
-    {
-        /* Build @PG from the ORIGINAL command line so it reads as the user
-         * typed it (e.g. `bwa-mem2 meth ref.fa R1.fq R2.fq`) — not the
-         * argv that gets rewritten with --meth-index downstream. */
-        tprof[MEM][0] = __rdtsc();
-        kstring_t pg = {0, 0, 0};
-        extern char *bwa_pg;
-        ksprintf(&pg, "@PG\tID:bwa-mem2\tPN:bwa-mem2\tVN:%s\tCL:%s", PACKAGE_VERSION, argv[0]);
-        for (int i = 1; i < argc; ++i) ksprintf(&pg, " %s", argv[i]);
-        ksprintf(&pg, "\n");
-        bwa_pg = pg.s;
-        ret = meth_align_main(argc - 1, argv + 1);
-        free(bwa_pg);
-        /* Fall through to parameter-print block (same as `mem`). */
     }
     else {
         fprintf(stderr, "ERROR: unknown command '%s'\n", argv[1]);

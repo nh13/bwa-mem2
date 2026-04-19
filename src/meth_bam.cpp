@@ -266,19 +266,14 @@ int meth_mem_aln_to_bam(bam1_t *b,
     /* Supp/alt bit folded into high byte of flag (parallels mem_aln2sam:1614) */
     uint16_t flag16 = (uint16_t)((p.flag & 0xffff) | (p.flag & 0x10000 ? 0x100 : 0));
 
-    /* Resolve output tids and direction. In native BS mode (meth-index /
-     * `bwa-mem2 meth`) there is no f/r chrom prefix — the hypothesis is
-     * carried in-band on mem_aln_t via meth_hyp (1=OT→'f', 2=OB→'r'). In
-     * legacy mode (bwameth.py doubled ref + `bwa-mem2 mem --meth`), the
-     * direction comes from the chrom name prefix. */
+    /* Resolve output tids and direction. Direction comes from the chrom
+     * name prefix (f/r), as emitted by `bwa-mem2 index --meth` (or
+     * equivalently bwameth.py index-mem2). */
     int32_t tid = -1, mtid = -1;
     char direction = 0;
     if (p.rid >= 0 && p.rid < cmap->n_internal) {
         tid       = cmap->out_tid[p.rid];
         direction = cmap->direction[p.rid];
-    }
-    if (opt->meth_dual_index && p.meth_hyp != 0) {
-        direction = (p.meth_hyp == 1) ? 'f' : (p.meth_hyp == 2 ? 'r' : 0);
     }
     if (mp && mp->rid >= 0 && mp->rid < cmap->n_internal) {
         mtid = cmap->out_tid[mp->rid];

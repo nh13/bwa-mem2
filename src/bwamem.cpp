@@ -654,8 +654,7 @@ SMEM *mem_collect_smem(FMI_search *fmi, const mem_opt_t *opt,
                        int32_t *rid,
                        mem_cache *mmc,
                        int64_t &tot_smem,
-                       int tid,
-                       int8_t meth_hyp)
+                       int tid)
 {
     int64_t pos = 0;
     int split_len = (int)(opt->min_seed_len * opt->split_factor + .499);
@@ -687,32 +686,6 @@ SMEM *mem_collect_smem(FMI_search *fmi, const mem_opt_t *opt,
         }
         offset += seq_[l].l_seq;
         rid[l] = l;
-    }
-
-    /* BS-aware seeding: project the encoded read in enc_qdb (NOT seq_[l].seq,
-     * which is reused by extension/scoring) so SMEM lookup against a 3-letter
-     * C→T-collapsed FMI succeeds. Only enc_qdb is touched; everything after
-     * the SMEM kernels uses the unprojected read with standard mat.
-     *   meth_hyp=1 (OT, batch-wide): C→T on read  encoded 1→3
-     *   meth_hyp=2 (OB, batch-wide): G→A on read  encoded 2→0
-     *   meth_hyp=3 (per-read dispatch): PE even→OT, PE odd→OB, SE→OT.
-     *     Matches bwameth.py c2t: R1=CT, R2=GA. */
-    const int is_pe = (opt->flag & MEM_F_PE) != 0;
-    if (meth_hyp == 1 || meth_hyp == 2) {
-        const uint8_t from = (meth_hyp == 1) ? 1 : 2;
-        const uint8_t to   = (meth_hyp == 1) ? 3 : 0;
-        for (int j = 0; j < offset; ++j)
-            if (enc_qdb[j] == from) enc_qdb[j] = to;
-    } else if (meth_hyp == 3) {
-        int off = 0;
-        for (int l = 0; l < nseq; ++l) {
-            int8_t hyp = (is_pe && (l & 1)) ? 2 : 1;
-            const uint8_t from = (hyp == 1) ? 1 : 2;
-            const uint8_t to   = (hyp == 1) ? 3 : 0;
-            for (int j = 0; j < seq_[l].l_seq; ++j)
-                if (enc_qdb[off + j] == from) enc_qdb[off + j] = to;
-            off += seq_[l].l_seq;
-        }
     }
 
     max_readlength = seq_[0].l_seq;
@@ -1029,8 +1002,7 @@ int mem_kernel1_core(FMI_search *fmi,
                      mem_seed_t *seedBuf,
                      int64_t seedBufSize,
                      mem_cache *mmc,
-                     int tid,
-                     int8_t meth_hyp)
+                     int tid)
 {
     int i;
     int64_t num_smem = 0, tot_len = 0;
@@ -1091,8 +1063,7 @@ int mem_kernel1_core(FMI_search *fmi,
                                   rid,
                                   mmc,
                                   num_smem,
-                                  tid,
-                                  meth_hyp);
+                                  tid);
 
     if (num_smem >= *wsize_mem){
         fprintf(stderr, "Error [bug]: num_smem: %ld are more than allocated space %ld.\n",
@@ -1259,8 +1230,7 @@ static void worker_bwt(void *data, int seq_id, int batch_size, int tid)
                      w->seedBuf + seq_id * AVG_SEEDS_PER_READ,
                      seedBufSz,
                      &(w->mmc),
-                     tid,
-                     w->meth_hyp);
+                     tid);
     printf_(VER, "4. Done mem_kernel1_core....\n");
 }
 
@@ -1405,138 +1375,13 @@ void mem_process_seqs(mem_opt_t *opt,
     int n_ = n;
 
     uint64_t tim = __rdtsc();
+    fprintf(stderr, "[0000] 1. Calling kt_for - worker_bwt\n");
 
-    /* BS-aware seeding.
-     *
-     * Our FMI text is CT(F) + CT(RC(F)). A read seeded natively covers
-     * two of the four BS hypotheses (OT and OB) — whichever half of the
-     * FMI matched tells us the strand origin. The remaining two (CTOT /
-     * CTOB — reads sequenced as the reverse-complement of a BS-converted
-     * strand) cannot seed natively because C→T projection breaks bwa-mem2's
-     * F+RC(F) symmetry (CT(RC(F)) ≠ RC(CT(F))). To cover them we run a
-     * second pass with RC(read) as the query: then CT(RC(R)) is what
-     * matches the FMI for CTOT/CTOB reads.
-     *
-     * Pass 2 is done by reverse-complementing seq_[l].seq in-place
-     * between kernels, running the full kernel1+kernel2 pipeline, then
-     * flipping the resulting regs' rb/re/qb/qe into R's native frame
-     * before merging with Pass 1. The final mem_reg2aln regenerates the
-     * CIGAR from the flipped coordinates, so no CIGAR transformation is
-     * needed here. */
-    if (opt->meth_dual_index) {
-        const int64_t l_pac = w.fmi->idx->bns->l_pac;
-        const int64_t two_l_pac = l_pac << 1;
+    kt_for(worker_bwt, &w, n_); // SMEMs (+SAL)
 
-        mem_alnreg_v *regs_fwd = (mem_alnreg_v *)calloc((size_t)n, sizeof(mem_alnreg_v));
-        mem_alnreg_v *regs_rc  = (mem_alnreg_v *)calloc((size_t)n, sizeof(mem_alnreg_v));
-        assert(regs_fwd != NULL && regs_rc != NULL);
+    fprintf(stderr, "[0000] 2. Calling kt_for - worker_aln\n");
 
-        /* ---- Pass 1: native read ---- */
-        w.meth_hyp = 1; /* C→T projection in mem_collect_smem */
-        fprintf(stderr, "[0000] 1a. Calling kt_for - worker_bwt (native)\n");
-        kt_for(worker_bwt, &w, n_);
-        fprintf(stderr, "[0000] 2a. Calling kt_for - worker_aln (native)\n");
-        kt_for(worker_aln, &w, n_);
-        for (int i = 0; i < n; ++i) {
-            for (size_t j = 0; j < w.regs[i].n; ++j) {
-                mem_alnreg_t *ar = &w.regs[i].a[j];
-                ar->meth_hyp = (ar->rb < l_pac) ? 1 : 2;
-            }
-            regs_fwd[i] = w.regs[i];
-            kv_init(w.regs[i]);
-        }
-
-        /* ---- Pass 2: RC the reads in-place (2-bit encoded bytes) ---- */
-        for (int i = 0; i < n; ++i) {
-            char *s = seqs[i].seq;
-            int L = seqs[i].l_seq;
-            for (int k = 0; k < L / 2; ++k) {
-                unsigned char a = (unsigned char)s[k];
-                unsigned char b = (unsigned char)s[L - 1 - k];
-                s[k]         = (b < 4) ? (char)(3 - b) : (char)b;
-                s[L - 1 - k] = (a < 4) ? (char)(3 - a) : (char)a;
-            }
-            if (L & 1) {
-                int mid = L / 2;
-                unsigned char c = (unsigned char)s[mid];
-                if (c < 4) s[mid] = (char)(3 - c);
-            }
-        }
-
-        w.meth_hyp = 1;
-        fprintf(stderr, "[0000] 1b. Calling kt_for - worker_bwt (RC'd)\n");
-        kt_for(worker_bwt, &w, n_);
-        fprintf(stderr, "[0000] 2b. Calling kt_for - worker_aln (RC'd)\n");
-        kt_for(worker_aln, &w, n_);
-
-        /* Flip each pass-2 reg into R's native frame. A pass-2 alignment at
-         * text positions [rb, re) with query positions [qb, qe) on RC(R)
-         * is equivalent to an R alignment at the mirrored text positions
-         * [2L - re, 2L - rb) with query positions [L_seq - qe, L_seq - qb).
-         * is_rev is implied by the new rb crossing the L_pac boundary.
-         *
-         * YD:Z is set from the PRE-FLIP rb (which FMI half the seed landed
-         * in). Post-flip rb tracks is_rev, not BS hypothesis — they're
-         * inverted for pass-2 regs because we RC'd the read. */
-        for (int i = 0; i < n; ++i) {
-            int L_seq = seqs[i].l_seq;
-            for (size_t j = 0; j < w.regs[i].n; ++j) {
-                mem_alnreg_t *ar = &w.regs[i].a[j];
-                int64_t rb_old = ar->rb, re_old = ar->re;
-                int     qb_old = ar->qb, qe_old = ar->qe;
-                ar->meth_hyp = (rb_old < l_pac) ? 1 : 2;
-                ar->rb = two_l_pac - re_old;
-                ar->re = two_l_pac - rb_old;
-                ar->qb = L_seq - qe_old;
-                ar->qe = L_seq - qb_old;
-            }
-            regs_rc[i] = w.regs[i];
-            kv_init(w.regs[i]);
-        }
-
-        /* Restore seq_[l].seq to its native (non-RC) form for worker_sam. */
-        for (int i = 0; i < n; ++i) {
-            char *s = seqs[i].seq;
-            int L = seqs[i].l_seq;
-            for (int k = 0; k < L / 2; ++k) {
-                unsigned char a = (unsigned char)s[k];
-                unsigned char b = (unsigned char)s[L - 1 - k];
-                s[k]         = (b < 4) ? (char)(3 - b) : (char)b;
-                s[L - 1 - k] = (a < 4) ? (char)(3 - a) : (char)a;
-            }
-            if (L & 1) {
-                int mid = L / 2;
-                unsigned char c = (unsigned char)s[mid];
-                if (c < 4) s[mid] = (char)(3 - c);
-            }
-        }
-
-        /* Merge: keep the hypothesis with the higher best-reg score. */
-        for (int i = 0; i < n; ++i) {
-            int best_fwd = 0, best_rc = 0;
-            for (size_t j = 0; j < regs_fwd[i].n; ++j)
-                if (regs_fwd[i].a[j].score > best_fwd) best_fwd = regs_fwd[i].a[j].score;
-            for (size_t j = 0; j < regs_rc[i].n; ++j)
-                if (regs_rc[i].a[j].score > best_rc) best_rc = regs_rc[i].a[j].score;
-            if (best_fwd >= best_rc) {
-                w.regs[i] = regs_fwd[i];
-                free(regs_rc[i].a);
-            } else {
-                w.regs[i] = regs_rc[i];
-                free(regs_fwd[i].a);
-            }
-        }
-        free(regs_fwd);
-        free(regs_rc);
-
-        w.meth_hyp = 0;
-    } else {
-        fprintf(stderr, "[0000] 1. Calling kt_for - worker_bwt\n");
-        kt_for(worker_bwt, &w, n_); // SMEMs (+SAL)
-
-        fprintf(stderr, "[0000] 2. Calling kt_for - worker_aln\n");
-        kt_for(worker_aln, &w, n_); // BSW
-    }
+    kt_for(worker_aln, &w, n_); // BSW
     tprof[WORKER10][0] += __rdtsc() - tim;
 
 
@@ -1953,22 +1798,7 @@ mem_aln_t mem_reg2aln(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *
         last_sc = score;
         w2 <<= 1;
     } while (++i < 3 && score < ar->truesc - opt->a);
-    /* Safety net for BS mode: if bwa_gen_cigar2 can't generate a CIGAR
-     * (e.g. because a SMEM against the 3-letter FMI landed at coordinates
-     * that don't round-trip cleanly against the original alphabet), emit
-     * the reg as unmapped rather than crashing. In non-BS mode this is
-     * unreachable so we keep the original assert as a regression guard. */
-    if (a.cigar == NULL) {
-        if (opt->meth_dual_index) {
-            free(a.cigar);
-            memset(&a, 0, sizeof(mem_aln_t));
-            a.rid = -1; a.pos = -1; a.flag |= 0x4;
-            a.meth_hyp = ar->meth_hyp;
-            free(query);
-            return a;
-        }
-        assert(a.cigar != NULL);
-    }
+    assert(a.cigar != NULL);
     l_MD = strlen((char*)(a.cigar + a.n_cigar)) + 1;
     a.NM = NM;
     pos = bns_depos(bns, rb < bns->l_pac? rb : re - 1, &is_rev);
@@ -2004,7 +1834,6 @@ mem_aln_t mem_reg2aln(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *
     a.pos = pos - bns->anns[a.rid].offset;
     a.score = ar->score; a.sub = ar->sub > ar->csub? ar->sub : ar->csub;
     a.is_alt = ar->is_alt; a.alt_sc = ar->alt_sc;
-    a.meth_hyp = ar->meth_hyp;
     free(query);
     return a;
 }

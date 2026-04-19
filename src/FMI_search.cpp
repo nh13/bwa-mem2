@@ -375,99 +375,7 @@ int FMI_search::build_index() {
     return 0;
 }
 
-/* --- BS-aware FM-index build (C→T projection of the forward reference) ---
- *
- * Reads <file_name>.pac (original alphabet), applies in-memory C→T on every
- * base (so 'C' becomes 'T'; other bases unchanged), then builds the suffix
- * array and FM-index from that 3-letter-alphabet projection. The .pac is
- * never modified. Output files:
- *   <file_name><suffix>.0123
- *   <file_name><suffix>.bwt.2bit.64
- * Example: build_index_bs(".meth") on prefix "ref.fa" writes
- *   ref.fa.meth.0123 / ref.fa.meth.bwt.2bit.64
- * alongside the unchanged ref.fa.pac / ref.fa.ann / ref.fa.amb. */
-int FMI_search::build_index_bs(const char *suffix)
-{
-    if (suffix == NULL || suffix[0] == '\0') return -1;
-
-    char *prefix = file_name;
-    char out_prefix[PATH_MAX];
-    strcpy_s(out_prefix, PATH_MAX, prefix);
-    strcat_s(out_prefix, PATH_MAX, suffix);
-
-    uint64_t startTick = __rdtsc();
-    index_alloc = 0;
-
-    std::string reference_seq;
-    char pac_file_name[PATH_MAX];
-    strcpy_s(pac_file_name, PATH_MAX, prefix);
-    strcat_s(pac_file_name, PATH_MAX, ".pac");
-    pac2nt(pac_file_name, reference_seq);
-    int64_t pac_len = reference_seq.length();
-
-    /* C→T projection (the core of the BS-aware index). */
-    for (int64_t i = 0; i < pac_len; ++i) {
-        if (reference_seq[i] == 'C') reference_seq[i] = 'T';
-    }
-
-    int64_t size = pac_len * sizeof(char);
-    char *binary_ref_seq = (char *)_mm_malloc(size, 64);
-    index_alloc += size;
-    assert_not_null(binary_ref_seq, size, index_alloc);
-
-    char binary_ref_name[PATH_MAX];
-    strcpy_s(binary_ref_name, PATH_MAX, out_prefix);
-    strcat_s(binary_ref_name, PATH_MAX, ".0123");
-    std::fstream binary_ref_stream(binary_ref_name, std::ios::out | std::ios::binary);
-    binary_ref_stream.seekg(0);
-    fprintf(stderr, "[bs-index] init ticks = %llu\n", __rdtsc() - startTick);
-    startTick = __rdtsc();
-
-    int64_t count[16];
-    memset(count, 0, sizeof(int64_t) * 16);
-    for (int64_t i = 0; i < pac_len; ++i) {
-        switch (reference_seq[i]) {
-            case 'A': binary_ref_seq[i] = 0; ++count[0]; break;
-            case 'C': binary_ref_seq[i] = 1; ++count[1]; break; /* should be 0 post-projection */
-            case 'G': binary_ref_seq[i] = 2; ++count[2]; break;
-            case 'T': binary_ref_seq[i] = 3; ++count[3]; break;
-            default:  binary_ref_seq[i] = 4;
-        }
-    }
-    count[4] = count[0] + count[1] + count[2] + count[3];
-    count[3] = count[0] + count[1] + count[2];
-    count[2] = count[0] + count[1];
-    count[1] = count[0];
-    count[0] = 0;
-    fprintf(stderr, "[bs-index] ref seq len = %ld (projected C count=%ld, should be 0)\n",
-            (long)pac_len, (long)(count[2] - count[1]));
-    binary_ref_stream.write(binary_ref_seq, pac_len * sizeof(char));
-    fprintf(stderr, "[bs-index] binary seq ticks = %llu\n", __rdtsc() - startTick);
-    startTick = __rdtsc();
-
-    size = (pac_len + 2) * sizeof(int64_t);
-    int64_t *suffix_array = (int64_t *)_mm_malloc(size, 64);
-    index_alloc += size;
-    assert_not_null(suffix_array, size, index_alloc);
-    startTick = __rdtsc();
-    saisxx(reference_seq.c_str(), suffix_array + 1, pac_len);
-    suffix_array[0] = pac_len;
-    fprintf(stderr, "[bs-index] build suffix-array ticks = %llu\n", __rdtsc() - startTick);
-    startTick = __rdtsc();
-
-    build_fm_index(out_prefix, binary_ref_seq, pac_len, suffix_array, count);
-    fprintf(stderr, "[bs-index] build fm-index ticks = %llu\n", __rdtsc() - startTick);
-    _mm_free(binary_ref_seq);
-    _mm_free(suffix_array);
-    return 0;
-}
-
 void FMI_search::load_index()
-{
-    load_index_bs(file_name);
-}
-
-void FMI_search::load_index_bs(const char *bns_prefix)
 {
     one_hot_mask_array = (uint64_t *)_mm_malloc(64 * sizeof(uint64_t), 64);
     one_hot_mask_array[0] = 0;
@@ -573,8 +481,8 @@ void FMI_search::load_index_bs(const char *bns_prefix)
     fprintf(stderr, "\n");  
 
     fprintf(stderr, "* Reading other elements of the index from files %s\n",
-            bns_prefix);
-    bwa_idx_load_ele(bns_prefix, BWA_IDX_ALL);
+            ref_file_name);
+    bwa_idx_load_ele(ref_file_name, BWA_IDX_ALL);
 
     fprintf(stderr, "* Done reading Index!!\n");
 }

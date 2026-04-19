@@ -98,21 +98,7 @@ class FMI_search: public indexEle
     //int64_t beCalls;
     
     int build_index();
-
-    /* Like build_index(), but applies an in-memory C→T projection to the
-     * reference before suffix-array + FM-index construction, and writes
-     * output files at `<file_name><suffix>` (e.g. ".meth") so the original
-     * index is preserved. `.pac`, `.ann`, `.amb` are NOT re-emitted — they
-     * carry the original alphabet and are shared with the normal index. */
-    int build_index_bs(const char *suffix);
-
     void load_index();
-
-    /* Like load_index(), but reads `.pac`/`.ann`/`.amb` (and `.0123` via the
-     * caller) from a separate prefix rather than reusing `file_name`. Used
-     * by `bwa-mem2 meth`: the FMI comes from `<ref>.meth.bwt.2bit.64` while
-     * bns/pac come from `<ref>.*` (original alphabet). */
-    void load_index_bs(const char *bns_prefix);
 
     void getSMEMs(uint8_t *enc_qdb,
                   int32_t numReads,
