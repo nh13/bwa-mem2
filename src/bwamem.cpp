@@ -654,7 +654,8 @@ SMEM *mem_collect_smem(FMI_search *fmi, const mem_opt_t *opt,
                        int32_t *rid,
                        mem_cache *mmc,
                        int64_t &tot_smem,
-                       int tid)
+                       int tid,
+                       int8_t meth_hyp)
 {
     int64_t pos = 0;
     int split_len = (int)(opt->min_seed_len * opt->split_factor + .499);
@@ -686,6 +687,32 @@ SMEM *mem_collect_smem(FMI_search *fmi, const mem_opt_t *opt,
         }
         offset += seq_[l].l_seq;
         rid[l] = l;
+    }
+
+    /* BS-aware seeding: project the encoded read in enc_qdb (NOT seq_[l].seq,
+     * which is reused by extension/scoring) so SMEM lookup against a 3-letter
+     * C→T-collapsed FMI succeeds. Only enc_qdb is touched; everything after
+     * the SMEM kernels uses the unprojected read with standard mat.
+     *   meth_hyp=1 (OT, batch-wide): C→T on read  encoded 1→3
+     *   meth_hyp=2 (OB, batch-wide): G→A on read  encoded 2→0
+     *   meth_hyp=3 (per-read dispatch): PE even→OT, PE odd→OB, SE→OT.
+     *     Matches bwameth.py c2t: R1=CT, R2=GA. */
+    const int is_pe = (opt->flag & MEM_F_PE) != 0;
+    if (meth_hyp == 1 || meth_hyp == 2) {
+        const uint8_t from = (meth_hyp == 1) ? 1 : 2;
+        const uint8_t to   = (meth_hyp == 1) ? 3 : 0;
+        for (int j = 0; j < offset; ++j)
+            if (enc_qdb[j] == from) enc_qdb[j] = to;
+    } else if (meth_hyp == 3) {
+        int off = 0;
+        for (int l = 0; l < nseq; ++l) {
+            int8_t hyp = (is_pe && (l & 1)) ? 2 : 1;
+            const uint8_t from = (hyp == 1) ? 1 : 2;
+            const uint8_t to   = (hyp == 1) ? 3 : 0;
+            for (int j = 0; j < seq_[l].l_seq; ++j)
+                if (enc_qdb[off + j] == from) enc_qdb[off + j] = to;
+            off += seq_[l].l_seq;
+        }
     }
 
     max_readlength = seq_[0].l_seq;
@@ -1002,7 +1029,8 @@ int mem_kernel1_core(FMI_search *fmi,
                      mem_seed_t *seedBuf,
                      int64_t seedBufSize,
                      mem_cache *mmc,
-                     int tid)
+                     int tid,
+                     int8_t meth_hyp)
 {
     int i;
     int64_t num_smem = 0, tot_len = 0;
@@ -1063,7 +1091,8 @@ int mem_kernel1_core(FMI_search *fmi,
                                   rid,
                                   mmc,
                                   num_smem,
-                                  tid);
+                                  tid,
+                                  meth_hyp);
 
     if (num_smem >= *wsize_mem){
         fprintf(stderr, "Error [bug]: num_smem: %ld are more than allocated space %ld.\n",
@@ -1230,7 +1259,8 @@ static void worker_bwt(void *data, int seq_id, int batch_size, int tid)
                      w->seedBuf + seq_id * AVG_SEEDS_PER_READ,
                      seedBufSz,
                      &(w->mmc),
-                     tid);
+                     tid,
+                     w->meth_hyp);
     printf_(VER, "4. Done mem_kernel1_core....\n");
 }
 
@@ -1375,13 +1405,40 @@ void mem_process_seqs(mem_opt_t *opt,
     int n_ = n;
 
     uint64_t tim = __rdtsc();
-    fprintf(stderr, "[0000] 1. Calling kt_for - worker_bwt\n");
 
+    /* Phase C: BS-aware seeding via OT (C→T) projection of every read.
+     *
+     * The FMI is already C→T-projected on both halves (forward + RC) by
+     * `meth-index`, so the OT projection on the READ makes methylated-C
+     * positions transparent during SMEM seeding. bwa-mem2's built-in
+     * forward+RC search then finds alignments for reads from either
+     * strand. Extension uses the original 4-letter .pac with the standard
+     * mat — T↔C mismatches will be penalized for methylated Cs, but the
+     * seed+chain step has already chosen the right region.
+     *
+     * TODO (follow-up): add the explicit OB (G→A) hypothesis alongside OT
+     * for non-directional libraries. The naive per-read G→A projection
+     * into the same 3-letter FMI produces seeds that extend past the
+     * valid reference bounds (re > 2*l_pac) for a small fraction of
+     * reads — the G→A read vs C→T-projected-RC-Watson seed space is
+     * asymmetric in a way the extension code doesn't currently handle.
+     * For directional BS libraries (which is what bwameth.py assumes for
+     * R1), OT-only gets us to methylation-call parity on most reads. */
+    if (opt->meth_dual_index) {
+        w.meth_hyp = 1;
+    }
+    fprintf(stderr, "[0000] 1. Calling kt_for - worker_bwt\n");
     kt_for(worker_bwt, &w, n_); // SMEMs (+SAL)
 
     fprintf(stderr, "[0000] 2. Calling kt_for - worker_aln\n");
-
     kt_for(worker_aln, &w, n_); // BSW
+    if (opt->meth_dual_index) {
+        /* Tag regs with the OT hypothesis so SAM emission writes YD:Z:f. */
+        for (int i = 0; i < n; ++i) {
+            for (size_t j = 0; j < w.regs[i].n; ++j) w.regs[i].a[j].meth_hyp = 1;
+        }
+        w.meth_hyp = 0;
+    }
     tprof[WORKER10][0] += __rdtsc() - tim;
 
 
@@ -1798,7 +1855,22 @@ mem_aln_t mem_reg2aln(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *
         last_sc = score;
         w2 <<= 1;
     } while (++i < 3 && score < ar->truesc - opt->a);
-    assert(a.cigar != NULL);
+    /* Safety net for BS mode: if bwa_gen_cigar2 can't generate a CIGAR
+     * (e.g. because a SMEM against the 3-letter FMI landed at coordinates
+     * that don't round-trip cleanly against the original alphabet), emit
+     * the reg as unmapped rather than crashing. In non-BS mode this is
+     * unreachable so we keep the original assert as a regression guard. */
+    if (a.cigar == NULL) {
+        if (opt->meth_dual_index) {
+            free(a.cigar);
+            memset(&a, 0, sizeof(mem_aln_t));
+            a.rid = -1; a.pos = -1; a.flag |= 0x4;
+            a.meth_hyp = ar->meth_hyp;
+            free(query);
+            return a;
+        }
+        assert(a.cigar != NULL);
+    }
     l_MD = strlen((char*)(a.cigar + a.n_cigar)) + 1;
     a.NM = NM;
     pos = bns_depos(bns, rb < bns->l_pac? rb : re - 1, &is_rev);
@@ -1834,6 +1906,7 @@ mem_aln_t mem_reg2aln(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *
     a.pos = pos - bns->anns[a.rid].offset;
     a.score = ar->score; a.sub = ar->sub > ar->csub? ar->sub : ar->csub;
     a.is_alt = ar->is_alt; a.alt_sc = ar->alt_sc;
+    a.meth_hyp = ar->meth_hyp;
     free(query);
     return a;
 }

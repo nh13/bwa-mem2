@@ -598,6 +598,7 @@ static int process(void *shared, gzFile gfp, gzFile gfp2, int pipe_threads)
     w.ref_string = aux->ref_string;
     w.fmi = aux->fmi;
     w.nreads  = nreads;
+    w.meth_hyp = 0;
     // w.memSize = nreads;
 
     aux_.n_workers = p_nt;
@@ -1014,6 +1015,17 @@ int main_mem(int argc, char *argv[])
 
     /* Matrix for SWA */
     bwa_fill_scmat(opt->a, opt->b, opt->mat);
+
+    /* BS-aware score matrices. OT = T↔C no penalty (read-T vs ref-C after
+     * C→T BS conversion on the forward strand). OB = A↔G no penalty (read-A
+     * vs ref-G after reverse-strand BS conversion, seen as G→A on forward).
+     * Row = query base (A=0,C=1,G=2,T=3), col = reference base. */
+    if (opt->meth_dual_index) {
+        bwa_fill_scmat(opt->a, opt->b, opt->meth_mat_ot);
+        opt->meth_mat_ot[3 * 5 + 1] = opt->a;   /* T (query) vs C (ref) = match */
+        bwa_fill_scmat(opt->a, opt->b, opt->meth_mat_ob);
+        opt->meth_mat_ob[0 * 5 + 2] = opt->a;   /* A (query) vs G (ref) = match */
+    }
 
     /* Load bwt2/FMI index. In --meth-index mode the FMI is loaded from
      * `<ref>.meth.*` (BS-aware, built by `bwa-mem2 meth-index`) while

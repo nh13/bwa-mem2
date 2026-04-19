@@ -109,6 +109,8 @@ typedef struct mem_opt_t {
     char meth_set_as_failed;// 'f', 'r', or 0: alignments to this strand get 0x200 (QC fail)
     int meth_no_chim;       // 1 to skip the longest-M <44% chimera heuristic
     int meth_dual_index;    // 1: load FMI from <ref>.meth.* (BS-aware) and bns/pac from <ref>.* (original)
+    int8_t meth_mat_ot[25]; // BS score matrix for OT hypothesis (T↔C no-penalty)
+    int8_t meth_mat_ob[25]; // BS score matrix for OB hypothesis (A↔G no-penalty)
 } mem_opt_t;
 
 
@@ -159,6 +161,7 @@ typedef struct mem_alnreg_t {
     float frac_rep;
     uint64_t hash;
     int flg;
+    int8_t meth_hyp;   // 0=unset, 1=OT (YD:Z:f), 2=OB (YD:Z:r); set during dual-pass seeding
 } mem_alnreg_t;
 
 typedef struct { size_t n, m; mem_alnreg_t *a; } mem_alnreg_v;
@@ -179,6 +182,7 @@ typedef struct { // This struct is only used for the convenience of API.
     char *XA;        // alternative mappings
 
     int score, sub, alt_sc;
+    int8_t meth_hyp; // 0=unset, 1=OT (YD:Z:f), 2=OB (YD:Z:r); propagated from mem_alnreg_t
 } mem_aln_t;
 
 // struct
@@ -233,7 +237,8 @@ typedef struct worker_t {
     uint8_t          *ref_string;
     int16_t           nthreads;
     int32_t           nreads;
-    FMI_search       *fmi;  
+    FMI_search       *fmi;
+    int8_t            meth_hyp; // 0=unset, 1=OT (C→T project), 2=OB (G→A project); set per dual-pass
 } worker_t;
 
 
@@ -270,7 +275,8 @@ int mem_kernel1_core(FMI_search *fmi, const mem_opt_t *opt,
                      int nseq,
                      mem_chain_v *chain_ar,
                      mem_cache *mmc,
-                     int tid);
+                     int tid,
+                     int8_t meth_hyp);
 
 void* _mm_realloc(void *ptr, int64_t csize, int64_t nsize, int16_t dsize);
 
