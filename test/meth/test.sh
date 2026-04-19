@@ -140,3 +140,46 @@ fi
 MINE_F="$(grep -c YD:Z:f /tmp/meth_mine.sam || true)"
 MINE_R="$(grep -c YD:Z:r /tmp/meth_mine.sam || true)"
 echo "OK layer 2: bwa-mem2 mem --meth matches bwameth.py (records=$MINE_N, YD:Z:f=$MINE_F YD:Z:r=$MINE_R)"
+
+# ---------------------------------------------------------------------------
+# Layer 3: native BS alignment — `bwa-mem2 meth-index` + `bwa-mem2 meth`
+# ---------------------------------------------------------------------------
+# Phase C status: OT-only (C→T read projection). Layer 3 is a structural
+# smoke test — records emit, BAM is well-formed, YD:Z:f tags appear on
+# mapped records, @PG line reflects the user-typed 'meth' subcommand.
+# Methylation-call equivalence to bwameth.py is deferred until the OB
+# hypothesis ships (see Phase C commit body for the known gap).
+
+if [[ ! -f "$HERE/ref.fa.meth.bwt.2bit.64" ]]; then
+    "$BWAMEM2" meth-index ref.fa >/dev/null 2>&1
+fi
+
+"$BWAMEM2" meth -t 2 ref.fa t_R1.fastq.gz t_R2.fastq.gz 2>/dev/null > /tmp/meth_native.bam
+
+EOF3="$(tail -c 28 /tmp/meth_native.bam | od -An -v -t x1 | tr -d ' \n')"
+if [[ "${EOF3%$'\n'}" != "${EXPECT_EOF}" ]]; then
+    echo "FAIL layer 3: BGZF EOF marker mismatch (actual=$EOF3)"; exit 1
+fi
+
+HDR3="$("$SAMTOOLS" view -H /tmp/meth_native.bam 2>&1)"
+if echo "$HDR3" | grep -qi 'truncated\|EOF marker is absent'; then
+    echo "FAIL layer 3: samtools reports truncated BAM"; exit 1
+fi
+if ! echo "$HDR3" | grep -q 'ID:bwa-mem2-meth'; then
+    echo "FAIL layer 3: @PG ID:bwa-mem2-meth missing"; exit 1
+fi
+if ! echo "$HDR3" | grep -q 'CL:.* meth '; then
+    echo "FAIL layer 3: @PG CL should include the 'meth' subcommand"; exit 1
+fi
+
+TOTAL3="$("$SAMTOOLS" view -c /tmp/meth_native.bam 2>/dev/null)"
+if [[ "$TOTAL3" -lt 1 ]]; then echo "FAIL layer 3: zero records in output BAM"; exit 1; fi
+
+"$SAMTOOLS" view /tmp/meth_native.bam 2>/dev/null > /tmp/meth_native.sam
+YDF3="$(grep -c YD:Z:f /tmp/meth_native.sam || true)"
+YDR3="$(grep -c YD:Z:r /tmp/meth_native.sam || true)"
+# OT-only for now: every mapped record gets YD:Z:f, none YD:Z:r. Once OB
+# wires up this assertion flips to "both > 0".
+if [[ "$YDF3" -lt 1 ]]; then echo "FAIL layer 3: no YD:Z:f tags (OT path)"; exit 1; fi
+
+echo "OK layer 3: bwa-mem2 meth native (records=$TOTAL3, YD:Z:f=$YDF3 YD:Z:r=$YDR3)"
