@@ -48,6 +48,7 @@ int usage()
     fprintf(stderr, "  index         create index\n");
     fprintf(stderr, "  mem           alignment (add --meth for bisulfite-sequencing + BAM output)\n");
     fprintf(stderr, "  meth-index    build a BS-aware FM-index (side-by-side with the normal index)\n");
+    fprintf(stderr, "  meth          align BS-seq reads natively (auto-enables --meth + --meth-index)\n");
     fprintf(stderr, "  version       print version number\n");
     return 1;
 }
@@ -113,7 +114,24 @@ int main(int argc, char* argv[])
     else if (strcmp(argv[1], "meth-index") == 0)
     {
         return meth_index_main(argc-1, argv+1);
-    } else {
+    }
+    else if (strcmp(argv[1], "meth") == 0)
+    {
+        /* Build @PG from the ORIGINAL command line so it reads as the user
+         * typed it (e.g. `bwa-mem2 meth ref.fa R1.fq R2.fq`) — not the
+         * argv that gets rewritten with --meth-index downstream. */
+        tprof[MEM][0] = __rdtsc();
+        kstring_t pg = {0, 0, 0};
+        extern char *bwa_pg;
+        ksprintf(&pg, "@PG\tID:bwa-mem2\tPN:bwa-mem2\tVN:%s\tCL:%s", PACKAGE_VERSION, argv[0]);
+        for (int i = 1; i < argc; ++i) ksprintf(&pg, " %s", argv[i]);
+        ksprintf(&pg, "\n");
+        bwa_pg = pg.s;
+        ret = meth_align_main(argc - 1, argv + 1);
+        free(bwa_pg);
+        /* Fall through to parameter-print block (same as `mem`). */
+    }
+    else {
         fprintf(stderr, "ERROR: unknown command '%s'\n", argv[1]);
         return 1;
     }

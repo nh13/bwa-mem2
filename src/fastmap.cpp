@@ -773,15 +773,19 @@ int main_mem(int argc, char *argv[])
     //   --meth                      Enable BS-Seq post-processing + uncompressed BAM output
     //   --set-as-failed f|r         Flag alignments to this strand as QC-fail (0x200)
     //   --do-not-penalize-chimeras  Skip the longest-match <44% chimera heuristic
+    //   --meth-index                Load FMI from <ref>.meth.* (BS-aware) + bns/pac from <ref>.* (original).
+    //                               Implies --meth. Requires a prior `bwa-mem2 meth-index` run.
     enum {
         OPT_METH = 1000,
         OPT_METH_SET_AS_FAILED,
         OPT_METH_NO_CHIMERA,
+        OPT_METH_DUAL_INDEX,
     };
     static struct option long_opts[] = {
         {"meth",                     no_argument,       0, OPT_METH},
         {"set-as-failed",            required_argument, 0, OPT_METH_SET_AS_FAILED},
         {"do-not-penalize-chimeras", no_argument,       0, OPT_METH_NO_CHIMERA},
+        {"meth-index",               no_argument,       0, OPT_METH_DUAL_INDEX},
         {0, 0, 0, 0}
     };
     while ((c = getopt_long(argc, argv, "51qpaMCSPVYjk:c:v:s:r:t:R:A:B:O:E:U:w:L:d:T:Q:D:m:I:N:W:x:G:h:y:K:X:H:o:f:",
@@ -917,6 +921,12 @@ int main_mem(int argc, char *argv[])
         else if (c == OPT_METH_NO_CHIMERA) {
             opt->meth_no_chim = 1;
         }
+        else if (c == OPT_METH_DUAL_INDEX) {
+            /* --meth-index implies --meth: you cannot use a BS-aware FMI
+             * meaningfully without the BS post-processing. */
+            opt->meth_mode = 1;
+            opt->meth_dual_index = 1;
+        }
         else if (c == 'I')
         {
             aux.pes0 = pes;
@@ -1005,12 +1015,27 @@ int main_mem(int argc, char *argv[])
     /* Matrix for SWA */
     bwa_fill_scmat(opt->a, opt->b, opt->mat);
 
-    /* Load bwt2/FMI index */
+    /* Load bwt2/FMI index. In --meth-index mode the FMI is loaded from
+     * `<ref>.meth.*` (BS-aware, built by `bwa-mem2 meth-index`) while
+     * bns/pac/.0123 still come from `<ref>.*` (original alphabet) so that
+     * extension/scoring and reference-string reads see the true bases. */
     uint64_t tim = __rdtsc();
 
-    fprintf(stderr, "* Ref file: %s\n", argv[optind]);
-    aux.fmi = new FMI_search(argv[optind]);
-    aux.fmi->load_index();
+    const char *ref_prefix = argv[optind];
+    char fmi_prefix[PATH_MAX];
+    if (opt->meth_dual_index) {
+        int n = snprintf(fmi_prefix, PATH_MAX, "%s.meth", ref_prefix);
+        if (n <= 0 || n >= PATH_MAX) {
+            fprintf(stderr, "ERROR: ref path too long for --meth-index\n");
+            exit(EXIT_FAILURE);
+        }
+        fprintf(stderr, "* Ref file: %s (FMI prefix: %s)\n", ref_prefix, fmi_prefix);
+    } else {
+        fprintf(stderr, "* Ref file: %s\n", ref_prefix);
+    }
+    aux.fmi = new FMI_search(opt->meth_dual_index ? fmi_prefix : ref_prefix);
+    if (opt->meth_dual_index) aux.fmi->load_index_bs(ref_prefix);
+    else                      aux.fmi->load_index();
     tprof[FMI][0] += __rdtsc() - tim;
 
     // reading ref string from the file
@@ -1018,7 +1043,7 @@ int main_mem(int argc, char *argv[])
     fprintf(stderr, "* Reading reference genome..\n");
 
     char binary_seq_file[PATH_MAX];
-    strcpy_s(binary_seq_file, PATH_MAX, argv[optind]);
+    strcpy_s(binary_seq_file, PATH_MAX, ref_prefix);
     strcat_s(binary_seq_file, PATH_MAX, ".0123");
     //sprintf(binary_seq_file, "%s.0123", argv[optind]);
 

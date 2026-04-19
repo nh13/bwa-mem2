@@ -108,6 +108,7 @@ typedef struct mem_opt_t {
     int meth_mode;          // bisulfite-sequencing mode: enable --meth post-processing + BAM output (0/1)
     char meth_set_as_failed;// 'f', 'r', or 0: alignments to this strand get 0x200 (QC fail)
     int meth_no_chim;       // 1 to skip the longest-M <44% chimera heuristic
+    int meth_dual_index;    // 1: load FMI from <ref>.meth.* (BS-aware) and bns/pac from <ref>.* (original)
 } mem_opt_t;
 
 

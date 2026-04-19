@@ -69,7 +69,8 @@ LIBS=		-lpthread -lm -lz -L. -lbwa -Lext/safestringlib -lsafestring -Lext/htslib
 OBJS=		src/fastmap.o src/bwtindex.o src/utils.o src/memcpy_bwamem.o src/kthread.o \
 			src/kstring.o src/ksw.o src/bntseq.o src/bwamem.o src/profiling.o src/bandedSWA.o \
 			src/FMI_search.o src/read_index_ele.o src/bwamem_pair.o src/kswv.o src/bwa.o \
-			src/bwamem_extra.o src/kopen.o src/meth_postproc.o src/meth_bam.o src/meth_index.o
+			src/bwamem_extra.o src/kopen.o src/meth_postproc.o src/meth_bam.o src/meth_index.o \
+			src/meth_align.o
 BWA_LIB=    libbwa.a
 SAFE_STR_LIB=    ext/safestringlib/libsafestring.a
 HTS_LIB=    ext/htslib/libhts.a
@@ -253,3 +254,4 @@ src/memcpy_bwamem.o: src/memcpy_bwamem.h
 src/meth_postproc.o: src/meth_postproc.h
 src/meth_bam.o: src/meth_bam.h src/bwamem.h src/bwa.h src/bntseq.h src/meth_postproc.h
 src/meth_index.o: src/meth_index.h src/FMI_search.h src/bntseq.h src/bwa.h
+src/meth_align.o: src/meth_index.h src/fastmap.h

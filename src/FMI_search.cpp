@@ -464,6 +464,11 @@ int FMI_search::build_index_bs(const char *suffix)
 
 void FMI_search::load_index()
 {
+    load_index_bs(file_name);
+}
+
+void FMI_search::load_index_bs(const char *bns_prefix)
+{
     one_hot_mask_array = (uint64_t *)_mm_malloc(64 * sizeof(uint64_t), 64);
     one_hot_mask_array[0] = 0;
     uint64_t base = 0x8000000000000000L;
@@ -568,8 +573,8 @@ void FMI_search::load_index()
     fprintf(stderr, "\n");  
 
     fprintf(stderr, "* Reading other elements of the index from files %s\n",
-            ref_file_name);
-    bwa_idx_load_ele(ref_file_name, BWA_IDX_ALL);
+            bns_prefix);
+    bwa_idx_load_ele(bns_prefix, BWA_IDX_ALL);
 
     fprintf(stderr, "* Done reading Index!!\n");
 }
