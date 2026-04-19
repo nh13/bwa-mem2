@@ -1013,6 +1013,19 @@ int main_mem(int argc, char *argv[])
         }
     } else update_a(opt, &opt0);
 
+    /* Meth-mode default tuning. bwameth.py runs bwa-mem2 with -B 2 -L 10
+     * -U 100 — these reduce mismatch and soft-clip penalties so BS reads
+     * (which carry real C-vs-T diffs at methylated sites plus scattered
+     * non-BS mismatches) get long, un-clipped alignments rather than
+     * heavily-clipped or unmapped. Only override when the user hasn't
+     * explicitly set the knob. */
+    if (opt->meth_dual_index) {
+        if (!opt0.b)            opt->b           = 2;
+        if (!opt0.pen_clip5)    opt->pen_clip5   = 10;
+        if (!opt0.pen_clip3)    opt->pen_clip3   = 10;
+        if (!opt0.pen_unpaired) opt->pen_unpaired= 100;
+    }
+
     /* Matrix for SWA */
     bwa_fill_scmat(opt->a, opt->b, opt->mat);
 
