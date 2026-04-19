@@ -1056,19 +1056,27 @@ int main_mem(int argc, char *argv[])
     /* Matrix for SWA */
     bwa_fill_scmat(opt->a, opt->b, opt->mat);
 
-    /* In --meth, the user passes the original FASTA path but the index
-     * actually lives at <ref>.bwameth.c2t (emitted by `bwa-mem2 index
-     * --meth`). Auto-append so the UX is "bwa-mem2 mem --meth ref.fa"
-     * rather than "...ref.fa.bwameth.c2t". */
+    /* In --meth the canonical UX is "bwa-mem2 mem --meth ref.fa" and
+     * we auto-append ".bwameth.c2t" to find the index built by
+     * "bwa-mem2 index --meth". If the user (or bwameth.py's internal
+     * invocation) already passed the ".bwameth.c2t" path directly, use
+     * it as-is rather than double-appending. */
     char c2t_ref[PATH_MAX];
     const char *ref_prefix = argv[optind];
     if (opt->meth_mode) {
-        int n = snprintf(c2t_ref, sizeof(c2t_ref), "%s.bwameth.c2t", argv[optind]);
-        if (n <= 0 || (size_t)n >= sizeof(c2t_ref)) {
-            fprintf(stderr, "ERROR: ref path too long for --meth\n");
-            exit(EXIT_FAILURE);
+        const char *suffix = ".bwameth.c2t";
+        size_t slen = strlen(suffix);
+        size_t alen = strlen(argv[optind]);
+        int already_c2t = (alen >= slen) &&
+                          (strcmp(argv[optind] + alen - slen, suffix) == 0);
+        if (!already_c2t) {
+            int n = snprintf(c2t_ref, sizeof(c2t_ref), "%s%s", argv[optind], suffix);
+            if (n <= 0 || (size_t)n >= sizeof(c2t_ref)) {
+                fprintf(stderr, "ERROR: ref path too long for --meth\n");
+                exit(EXIT_FAILURE);
+            }
+            ref_prefix = c2t_ref;
         }
-        ref_prefix = c2t_ref;
     }
 
     /* Load bwt2/FMI index */

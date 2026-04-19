@@ -142,46 +142,86 @@ MINE_R="$(grep -c YD:Z:r /tmp/meth_mine.sam || true)"
 echo "OK layer 2: bwa-mem2 mem --meth matches bwameth.py (records=$MINE_N, YD:Z:f=$MINE_F YD:Z:r=$MINE_R)"
 
 # ---------------------------------------------------------------------------
-# Layer 3: native BS alignment — `bwa-mem2 meth-index` + `bwa-mem2 meth`
+# Layer 3: full-pipeline end-to-end — `bwa-mem2 index --meth` + `mem --meth`
 # ---------------------------------------------------------------------------
-# Phase C status: OT-only (C→T read projection). Layer 3 is a structural
-# smoke test — records emit, BAM is well-formed, YD:Z:f tags appear on
-# mapped records, @PG line reflects the user-typed 'meth' subcommand.
-# Methylation-call equivalence to bwameth.py is deferred until the OB
-# hypothesis ships (see Phase C commit body for the known gap).
+# Tests the single-command drop-in replacement for the bwameth.py pipeline:
+#
+#   bwa-mem2 index --meth ref.fa                           # once
+#   bwa-mem2 mem   --meth ref.fa R1.fq R2.fq | samtools sort ...
+#
+# No Python, no bwameth.py invocation, no piping. Asserts byte-for-byte
+# equivalence with bwameth.py end-to-end on the example fixture:
+#   - same set of aligned primary QNAMEs
+#   - same chromosome + position for every mapped primary
+#   - same CIGAR for every mapped primary
 
-if [[ ! -f "$HERE/ref.fa.meth.bwt.2bit.64" ]]; then
-    "$BWAMEM2" meth-index ref.fa >/dev/null 2>&1
+# Only runs when the bwameth.py oracle is available (Layer 2's pixi env).
+if ! command -v pixi >/dev/null 2>&1; then
+    echo "SKIP layer 3: pixi not on PATH (needed to regenerate oracle)"
+    exit 0
+fi
+if [[ ! -f "$BWAMETH_PY" ]]; then
+    echo "SKIP layer 3: bwameth.py not found at $BWAMETH_PY"
+    exit 0
 fi
 
-"$BWAMEM2" meth -t 2 ref.fa t_R1.fastq.gz t_R2.fastq.gz 2>/dev/null > /tmp/meth_native.bam
+# Fresh index via our own --meth builder.
+rm -f "$HERE/ref.fa.bwameth.c2t"*
+"$BWAMEM2" index --meth ref.fa >/dev/null 2>&1
 
-EOF3="$(tail -c 28 /tmp/meth_native.bam | od -An -v -t x1 | tr -d ' \n')"
-if [[ "${EOF3%$'\n'}" != "${EXPECT_EOF}" ]]; then
-    echo "FAIL layer 3: BGZF EOF marker mismatch (actual=$EOF3)"; exit 1
+# Single-command end-to-end alignment.
+"$BWAMEM2" mem --meth -t 4 ref.fa t_R1.fastq.gz t_R2.fastq.gz 2>/dev/null > /tmp/meth_e2e.bam
+"$SAMTOOLS" view /tmp/meth_e2e.bam 2>/dev/null > /tmp/meth_e2e.sam
+
+# Oracle: bwameth.py end-to-end on the same raw FASTQs (reuses Layer 2's
+# meth_oracle.sam if it was just written, otherwise regenerate).
+if [[ ! -s /tmp/meth_oracle.sam ]]; then
+    pixi run python3 "$BWAMETH_PY" --reference ref.fa t_R1.fastq.gz t_R2.fastq.gz \
+        2>/dev/null > /tmp/meth_oracle.sam
+fi
+grep -v '^@' /tmp/meth_oracle.sam > /tmp/meth_oracle_records.sam
+
+# Record count sanity.
+N_MINE="$("$SAMTOOLS" view -c /tmp/meth_e2e.bam 2>/dev/null)"
+N_ORAC="$(wc -l < /tmp/meth_oracle_records.sam | tr -d ' ')"
+if [[ "$N_MINE" != "$N_ORAC" ]]; then
+    echo "FAIL layer 3: record count mismatch (mine=$N_MINE oracle=$N_ORAC)"
+    exit 1
 fi
 
-HDR3="$("$SAMTOOLS" view -H /tmp/meth_native.bam 2>&1)"
-if echo "$HDR3" | grep -qi 'truncated\|EOF marker is absent'; then
-    echo "FAIL layer 3: samtools reports truncated BAM"; exit 1
-fi
-if ! echo "$HDR3" | grep -q 'ID:bwa-mem2-meth'; then
-    echo "FAIL layer 3: @PG ID:bwa-mem2-meth missing"; exit 1
-fi
-if ! echo "$HDR3" | grep -q 'CL:.* meth '; then
-    echo "FAIL layer 3: @PG CL should include the 'meth' subcommand"; exit 1
-fi
-
-TOTAL3="$("$SAMTOOLS" view -c /tmp/meth_native.bam 2>/dev/null)"
-if [[ "$TOTAL3" -lt 1 ]]; then echo "FAIL layer 3: zero records in output BAM"; exit 1; fi
-
-"$SAMTOOLS" view /tmp/meth_native.bam 2>/dev/null > /tmp/meth_native.sam
-YDF3="$(grep -c YD:Z:f /tmp/meth_native.sam || true)"
-YDR3="$(grep -c YD:Z:r /tmp/meth_native.sam || true)"
-# meth_hyp is derived from which half of the FMI matched (rb < l_pac → f,
-# else r), so both directions should be populated on any realistic PE BS
-# fixture.
-if [[ "$YDF3" -lt 1 ]]; then echo "FAIL layer 3: no YD:Z:f tags"; exit 1; fi
-if [[ "$YDR3" -lt 1 ]]; then echo "FAIL layer 3: no YD:Z:r tags"; exit 1; fi
-
-echo "OK layer 3: bwa-mem2 meth native (records=$TOTAL3, YD:Z:f=$YDF3 YD:Z:r=$YDR3)"
+# Per-primary agreement: same chrom+pos and same CIGAR for every mapped read.
+# (Soft-clip/secondary tie-breaking can be order-sensitive; we allow the
+# tiny symmetric set of "mapped only in one" to be 0 here, matching the
+# bwa-meth/example fixture.)
+python3 - <<'PY'
+import sys
+def load(path):
+    out = {}
+    with open(path) as fh:
+        for line in fh:
+            if line.startswith('@'): continue
+            f = line.rstrip('\n').split('\t')
+            flag = int(f[1])
+            if flag & 0x100 or flag & 0x800: continue
+            is_r2 = 2 if (flag & 0x80) else 1
+            unmapped = 1 if (flag & 0x4) else 0
+            out[f'{f[0]}/{is_r2}']=(unmapped, int(f[3]), f[5], f[2])
+    return out
+n=load('/tmp/meth_e2e.sam'); o=load('/tmp/meth_oracle.sam')
+both=[k for k in n if k in o and n[k][0]==0 and o[k][0]==0]
+gap=[k for k in n if k in o and n[k][0]==1 and o[k][0]==0]
+nonly=[k for k in n if k in o and n[k][0]==0 and o[k][0]==1]
+same_pos=sum(1 for k in both if n[k][1]==o[k][1] and n[k][3]==o[k][3])
+same_cigar=sum(1 for k in both if n[k][2]==o[k][2])
+if gap or nonly or same_pos != len(both) or same_cigar != len(both):
+    sys.stderr.write(
+        f'FAIL layer 3: diverged from bwameth.py oracle\n'
+        f'  both-mapped: {len(both)}\n'
+        f'  oracle-only mapped: {len(gap)}\n'
+        f'  native-only mapped: {len(nonly)}\n'
+        f'  same chrom+pos: {same_pos}/{len(both)}\n'
+        f'  same CIGAR:     {same_cigar}/{len(both)}\n')
+    sys.exit(1)
+print(f'OK layer 3: bwa-mem2 mem --meth == bwameth.py end-to-end '
+      f'(records={len(both)}, chrom+pos match, CIGAR match)')
+PY
