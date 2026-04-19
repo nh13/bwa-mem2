@@ -227,14 +227,15 @@ The `meth` subcommand auto-enables `--meth` + `--meth-index` — loading the
 for bns lookups and extension. Output is uncompressed BAM with the same
 YD:Z, chimera QC, and QC-fail propagation as the doubled-ref path.
 
-**Status:** Phase C (OT hypothesis, C→T read projection) is wired and
-passes structural regression tests on the `bwa-meth/example/` fixture.
-The OB (G→A) hypothesis is a follow-up — for directional BS-Seq
-libraries (the typical case and bwameth.py's default for R1) the OT
-path reaches methylation-call parity on most reads. Output records for
-now all carry `YD:Z:f`; once OB lands the subset from Crick-sourced
-reads will flip to `YD:Z:r`. See `docs/superpowers/design/bwa-mem2-meth.md`
-for the full architecture.
+**Status:** Wired end-to-end. Both strand hypotheses populate YD:Z
+because bwa-mem2's forward+RC FMI layout already answers the "which
+strand did this read come from" question — a seed in the forward half
+is a Watson-origin read (YD:Z:f), one in the reverse half is
+Crick-origin (YD:Z:r). A single C→T projection on the read (to mask
+any surviving methylated Cs) is enough; no explicit dual-pass seeding
+is needed. Extension uses a BS-friendly score matrix (T↔C = match)
+against the original 4-letter reference. See
+`docs/superpowers/design/bwa-mem2-meth.md` for the full architecture.
 
 ## Citation
 
