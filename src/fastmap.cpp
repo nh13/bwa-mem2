@@ -298,6 +298,40 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
                 ret->seqs[i].comment = 0;
             }
         }
+
+        /* Inline bwameth-style c2t conversion on read ingest. Matches
+         * `bwameth.py c2t R1.fq R2.fq`: even-index reads (R1) get C→T,
+         * odd-index reads (R2) get G→A. The original sequence is stashed
+         * as a YS:Z comment tag and the conversion type as YC:Z — these
+         * pass through to SAM via copy_comment (which --meth sets). */
+        if (aux->opt->meth_mode) {
+            int is_pe = (aux->opt->flag & MEM_F_PE) != 0;
+            for (int i = 0; i < ret->n_seqs; ++i) {
+                bseq1_t *s = &ret->seqs[i];
+                int is_r2 = is_pe && (i & 1);
+                const char *yc = is_r2 ? "GA" : "CT";
+                char from = is_r2 ? 'G' : 'C';
+                char from_lo = is_r2 ? 'g' : 'c';
+                char to   = is_r2 ? 'A' : 'T';
+                int l = s->l_seq;
+                /* Build the YS:Z/YC:Z comment now, replacing any prior
+                 * comment (which we'd otherwise propagate into SAM). */
+                size_t yslen = (size_t)l + 32;
+                char *comment = (char *)malloc(yslen);
+                assert(comment != NULL);
+                int off = snprintf(comment, yslen, "YS:Z:");
+                memcpy(comment + off, s->seq, (size_t)l);
+                off += l;
+                off += snprintf(comment + off, yslen - off, "\tYC:Z:%s", yc);
+                free(s->comment);
+                s->comment = comment;
+                /* Project in place. */
+                for (int j = 0; j < l; ++j) {
+                    char c = s->seq[j];
+                    if (c == from || c == from_lo) s->seq[j] = to;
+                }
+            }
+        }
         {
             int64_t size = 0;
             for (int i = 0; i < ret->n_seqs; ++i) size += ret->seqs[i].l_seq;
@@ -1003,27 +1037,45 @@ int main_mem(int argc, char *argv[])
         }
     } else update_a(opt, &opt0);
 
-    /* Meth-mode default tuning. bwameth.py runs bwa-mem2 with -B 2 -L 10
-     * -U 100 — these reduce mismatch and soft-clip penalties so BS reads
-     * (which carry real C-vs-T diffs at methylated sites plus scattered
-     * non-BS mismatches) get long, un-clipped alignments rather than
-     * heavily-clipped or unmapped. Only override when the user hasn't
-     * explicitly set the knob. */
+    /* Meth-mode default tuning. bwameth.py runs bwa-mem2 with
+     * -B 2 -L 10 -U 100 -T 40 -CM — these reduce mismatch and soft-clip
+     * penalties so BS reads get long un-clipped alignments, raise the
+     * output score threshold, mark shorter hits as secondary, and
+     * pass the YS/YC comment tags through to SAM. We apply the same
+     * defaults when --meth is set, modulo explicit CLI overrides. */
     if (opt->meth_mode) {
         if (!opt0.b)            opt->b           = 2;
         if (!opt0.pen_clip5)    opt->pen_clip5   = 10;
         if (!opt0.pen_clip3)    opt->pen_clip3   = 10;
         if (!opt0.pen_unpaired) opt->pen_unpaired= 100;
+        if (!opt0.T)            opt->T           = 40;
+        opt->flag |= MEM_F_NO_MULTI;   /* -M */
+        aux.copy_comment = 1;          /* -C, needed for YS:Z/YC:Z passthrough */
     }
 
     /* Matrix for SWA */
     bwa_fill_scmat(opt->a, opt->b, opt->mat);
 
+    /* In --meth, the user passes the original FASTA path but the index
+     * actually lives at <ref>.bwameth.c2t (emitted by `bwa-mem2 index
+     * --meth`). Auto-append so the UX is "bwa-mem2 mem --meth ref.fa"
+     * rather than "...ref.fa.bwameth.c2t". */
+    char c2t_ref[PATH_MAX];
+    const char *ref_prefix = argv[optind];
+    if (opt->meth_mode) {
+        int n = snprintf(c2t_ref, sizeof(c2t_ref), "%s.bwameth.c2t", argv[optind]);
+        if (n <= 0 || (size_t)n >= sizeof(c2t_ref)) {
+            fprintf(stderr, "ERROR: ref path too long for --meth\n");
+            exit(EXIT_FAILURE);
+        }
+        ref_prefix = c2t_ref;
+    }
+
     /* Load bwt2/FMI index */
     uint64_t tim = __rdtsc();
 
-    fprintf(stderr, "* Ref file: %s\n", argv[optind]);
-    aux.fmi = new FMI_search(argv[optind]);
+    fprintf(stderr, "* Ref file: %s\n", ref_prefix);
+    aux.fmi = new FMI_search(ref_prefix);
     aux.fmi->load_index();
     tprof[FMI][0] += __rdtsc() - tim;
 
@@ -1032,7 +1084,7 @@ int main_mem(int argc, char *argv[])
     fprintf(stderr, "* Reading reference genome..\n");
 
     char binary_seq_file[PATH_MAX];
-    strcpy_s(binary_seq_file, PATH_MAX, argv[optind]);
+    strcpy_s(binary_seq_file, PATH_MAX, ref_prefix);
     strcat_s(binary_seq_file, PATH_MAX, ".0123");
     //sprintf(binary_seq_file, "%s.0123", argv[optind]);
 
