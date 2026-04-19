@@ -1473,18 +1473,22 @@ void mem_process_seqs(mem_opt_t *opt,
          * text positions [rb, re) with query positions [qb, qe) on RC(R)
          * is equivalent to an R alignment at the mirrored text positions
          * [2L - re, 2L - rb) with query positions [L_seq - qe, L_seq - qb).
-         * is_rev is implied by the new rb crossing the L_pac boundary. */
+         * is_rev is implied by the new rb crossing the L_pac boundary.
+         *
+         * YD:Z is set from the PRE-FLIP rb (which FMI half the seed landed
+         * in). Post-flip rb tracks is_rev, not BS hypothesis — they're
+         * inverted for pass-2 regs because we RC'd the read. */
         for (int i = 0; i < n; ++i) {
             int L_seq = seqs[i].l_seq;
             for (size_t j = 0; j < w.regs[i].n; ++j) {
                 mem_alnreg_t *ar = &w.regs[i].a[j];
                 int64_t rb_old = ar->rb, re_old = ar->re;
                 int     qb_old = ar->qb, qe_old = ar->qe;
+                ar->meth_hyp = (rb_old < l_pac) ? 1 : 2;
                 ar->rb = two_l_pac - re_old;
                 ar->re = two_l_pac - rb_old;
                 ar->qb = L_seq - qe_old;
                 ar->qe = L_seq - qb_old;
-                ar->meth_hyp = (ar->rb < l_pac) ? 1 : 2;
             }
             regs_rc[i] = w.regs[i];
             kv_init(w.regs[i]);
