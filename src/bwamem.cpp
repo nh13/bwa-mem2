@@ -1406,31 +1406,132 @@ void mem_process_seqs(mem_opt_t *opt,
 
     uint64_t tim = __rdtsc();
 
-    /* BS-aware seeding: C→T projection of the read (inside
-     * `mem_collect_smem`) makes methylated-C positions transparent against
-     * the 3-letter FMI. Because the FMI text is `CT(F) + CT(RC(F))` and
-     * bwa-mem2 already uses the forward+RC trick, the strand-origin
-     * hypothesis (OT vs OB) falls out for free from which FMI half the
-     * seed landed in — no dual-pass needed. The tagging at the bottom of
-     * this block encodes that: reg->rb < l_pac → forward half (YD:Z:f),
-     * else reverse half (YD:Z:r). */
-    if (opt->meth_dual_index) {
-        w.meth_hyp = 1;  /* 1 = apply C→T projection in mem_collect_smem */
-    }
-    fprintf(stderr, "[0000] 1. Calling kt_for - worker_bwt\n");
-    kt_for(worker_bwt, &w, n_); // SMEMs (+SAL)
-
-    fprintf(stderr, "[0000] 2. Calling kt_for - worker_aln\n");
-    kt_for(worker_aln, &w, n_); // BSW
+    /* BS-aware seeding.
+     *
+     * Our FMI text is CT(F) + CT(RC(F)). A read seeded natively covers
+     * two of the four BS hypotheses (OT and OB) — whichever half of the
+     * FMI matched tells us the strand origin. The remaining two (CTOT /
+     * CTOB — reads sequenced as the reverse-complement of a BS-converted
+     * strand) cannot seed natively because C→T projection breaks bwa-mem2's
+     * F+RC(F) symmetry (CT(RC(F)) ≠ RC(CT(F))). To cover them we run a
+     * second pass with RC(read) as the query: then CT(RC(R)) is what
+     * matches the FMI for CTOT/CTOB reads.
+     *
+     * Pass 2 is done by reverse-complementing seq_[l].seq in-place
+     * between kernels, running the full kernel1+kernel2 pipeline, then
+     * flipping the resulting regs' rb/re/qb/qe into R's native frame
+     * before merging with Pass 1. The final mem_reg2aln regenerates the
+     * CIGAR from the flipped coordinates, so no CIGAR transformation is
+     * needed here. */
     if (opt->meth_dual_index) {
         const int64_t l_pac = w.fmi->idx->bns->l_pac;
+        const int64_t two_l_pac = l_pac << 1;
+
+        mem_alnreg_v *regs_fwd = (mem_alnreg_v *)calloc((size_t)n, sizeof(mem_alnreg_v));
+        mem_alnreg_v *regs_rc  = (mem_alnreg_v *)calloc((size_t)n, sizeof(mem_alnreg_v));
+        assert(regs_fwd != NULL && regs_rc != NULL);
+
+        /* ---- Pass 1: native read ---- */
+        w.meth_hyp = 1; /* C→T projection in mem_collect_smem */
+        fprintf(stderr, "[0000] 1a. Calling kt_for - worker_bwt (native)\n");
+        kt_for(worker_bwt, &w, n_);
+        fprintf(stderr, "[0000] 2a. Calling kt_for - worker_aln (native)\n");
+        kt_for(worker_aln, &w, n_);
         for (int i = 0; i < n; ++i) {
             for (size_t j = 0; j < w.regs[i].n; ++j) {
                 mem_alnreg_t *ar = &w.regs[i].a[j];
                 ar->meth_hyp = (ar->rb < l_pac) ? 1 : 2;
             }
+            regs_fwd[i] = w.regs[i];
+            kv_init(w.regs[i]);
         }
+
+        /* ---- Pass 2: RC the reads in-place (2-bit encoded bytes) ---- */
+        for (int i = 0; i < n; ++i) {
+            char *s = seqs[i].seq;
+            int L = seqs[i].l_seq;
+            for (int k = 0; k < L / 2; ++k) {
+                unsigned char a = (unsigned char)s[k];
+                unsigned char b = (unsigned char)s[L - 1 - k];
+                s[k]         = (b < 4) ? (char)(3 - b) : (char)b;
+                s[L - 1 - k] = (a < 4) ? (char)(3 - a) : (char)a;
+            }
+            if (L & 1) {
+                int mid = L / 2;
+                unsigned char c = (unsigned char)s[mid];
+                if (c < 4) s[mid] = (char)(3 - c);
+            }
+        }
+
+        w.meth_hyp = 1;
+        fprintf(stderr, "[0000] 1b. Calling kt_for - worker_bwt (RC'd)\n");
+        kt_for(worker_bwt, &w, n_);
+        fprintf(stderr, "[0000] 2b. Calling kt_for - worker_aln (RC'd)\n");
+        kt_for(worker_aln, &w, n_);
+
+        /* Flip each pass-2 reg into R's native frame. A pass-2 alignment at
+         * text positions [rb, re) with query positions [qb, qe) on RC(R)
+         * is equivalent to an R alignment at the mirrored text positions
+         * [2L - re, 2L - rb) with query positions [L_seq - qe, L_seq - qb).
+         * is_rev is implied by the new rb crossing the L_pac boundary. */
+        for (int i = 0; i < n; ++i) {
+            int L_seq = seqs[i].l_seq;
+            for (size_t j = 0; j < w.regs[i].n; ++j) {
+                mem_alnreg_t *ar = &w.regs[i].a[j];
+                int64_t rb_old = ar->rb, re_old = ar->re;
+                int     qb_old = ar->qb, qe_old = ar->qe;
+                ar->rb = two_l_pac - re_old;
+                ar->re = two_l_pac - rb_old;
+                ar->qb = L_seq - qe_old;
+                ar->qe = L_seq - qb_old;
+                ar->meth_hyp = (ar->rb < l_pac) ? 1 : 2;
+            }
+            regs_rc[i] = w.regs[i];
+            kv_init(w.regs[i]);
+        }
+
+        /* Restore seq_[l].seq to its native (non-RC) form for worker_sam. */
+        for (int i = 0; i < n; ++i) {
+            char *s = seqs[i].seq;
+            int L = seqs[i].l_seq;
+            for (int k = 0; k < L / 2; ++k) {
+                unsigned char a = (unsigned char)s[k];
+                unsigned char b = (unsigned char)s[L - 1 - k];
+                s[k]         = (b < 4) ? (char)(3 - b) : (char)b;
+                s[L - 1 - k] = (a < 4) ? (char)(3 - a) : (char)a;
+            }
+            if (L & 1) {
+                int mid = L / 2;
+                unsigned char c = (unsigned char)s[mid];
+                if (c < 4) s[mid] = (char)(3 - c);
+            }
+        }
+
+        /* Merge: keep the hypothesis with the higher best-reg score. */
+        for (int i = 0; i < n; ++i) {
+            int best_fwd = 0, best_rc = 0;
+            for (size_t j = 0; j < regs_fwd[i].n; ++j)
+                if (regs_fwd[i].a[j].score > best_fwd) best_fwd = regs_fwd[i].a[j].score;
+            for (size_t j = 0; j < regs_rc[i].n; ++j)
+                if (regs_rc[i].a[j].score > best_rc) best_rc = regs_rc[i].a[j].score;
+            if (best_fwd >= best_rc) {
+                w.regs[i] = regs_fwd[i];
+                free(regs_rc[i].a);
+            } else {
+                w.regs[i] = regs_rc[i];
+                free(regs_fwd[i].a);
+            }
+        }
+        free(regs_fwd);
+        free(regs_rc);
+
         w.meth_hyp = 0;
+    } else {
+        fprintf(stderr, "[0000] 1. Calling kt_for - worker_bwt\n");
+        kt_for(worker_bwt, &w, n_); // SMEMs (+SAL)
+
+        fprintf(stderr, "[0000] 2. Calling kt_for - worker_aln\n");
+        kt_for(worker_aln, &w, n_); // BSW
     }
     tprof[WORKER10][0] += __rdtsc() - tim;
 
