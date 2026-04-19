@@ -1406,26 +1406,16 @@ void mem_process_seqs(mem_opt_t *opt,
 
     uint64_t tim = __rdtsc();
 
-    /* Phase C: BS-aware seeding via OT (C→T) projection of every read.
-     *
-     * The FMI is already C→T-projected on both halves (forward + RC) by
-     * `meth-index`, so the OT projection on the READ makes methylated-C
-     * positions transparent during SMEM seeding. bwa-mem2's built-in
-     * forward+RC search then finds alignments for reads from either
-     * strand. Extension uses the original 4-letter .pac with the standard
-     * mat — T↔C mismatches will be penalized for methylated Cs, but the
-     * seed+chain step has already chosen the right region.
-     *
-     * TODO (follow-up): add the explicit OB (G→A) hypothesis alongside OT
-     * for non-directional libraries. The naive per-read G→A projection
-     * into the same 3-letter FMI produces seeds that extend past the
-     * valid reference bounds (re > 2*l_pac) for a small fraction of
-     * reads — the G→A read vs C→T-projected-RC-Watson seed space is
-     * asymmetric in a way the extension code doesn't currently handle.
-     * For directional BS libraries (which is what bwameth.py assumes for
-     * R1), OT-only gets us to methylation-call parity on most reads. */
+    /* BS-aware seeding: C→T projection of the read (inside
+     * `mem_collect_smem`) makes methylated-C positions transparent against
+     * the 3-letter FMI. Because the FMI text is `CT(F) + CT(RC(F))` and
+     * bwa-mem2 already uses the forward+RC trick, the strand-origin
+     * hypothesis (OT vs OB) falls out for free from which FMI half the
+     * seed landed in — no dual-pass needed. The tagging at the bottom of
+     * this block encodes that: reg->rb < l_pac → forward half (YD:Z:f),
+     * else reverse half (YD:Z:r). */
     if (opt->meth_dual_index) {
-        w.meth_hyp = 1;
+        w.meth_hyp = 1;  /* 1 = apply C→T projection in mem_collect_smem */
     }
     fprintf(stderr, "[0000] 1. Calling kt_for - worker_bwt\n");
     kt_for(worker_bwt, &w, n_); // SMEMs (+SAL)
@@ -1433,9 +1423,12 @@ void mem_process_seqs(mem_opt_t *opt,
     fprintf(stderr, "[0000] 2. Calling kt_for - worker_aln\n");
     kt_for(worker_aln, &w, n_); // BSW
     if (opt->meth_dual_index) {
-        /* Tag regs with the OT hypothesis so SAM emission writes YD:Z:f. */
+        const int64_t l_pac = w.fmi->idx->bns->l_pac;
         for (int i = 0; i < n; ++i) {
-            for (size_t j = 0; j < w.regs[i].n; ++j) w.regs[i].a[j].meth_hyp = 1;
+            for (size_t j = 0; j < w.regs[i].n; ++j) {
+                mem_alnreg_t *ar = &w.regs[i].a[j];
+                ar->meth_hyp = (ar->rb < l_pac) ? 1 : 2;
+            }
         }
         w.meth_hyp = 0;
     }

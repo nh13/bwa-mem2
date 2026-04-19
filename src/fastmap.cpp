@@ -1016,15 +1016,17 @@ int main_mem(int argc, char *argv[])
     /* Matrix for SWA */
     bwa_fill_scmat(opt->a, opt->b, opt->mat);
 
-    /* BS-aware score matrices. OT = T↔C no penalty (read-T vs ref-C after
-     * C→T BS conversion on the forward strand). OB = A↔G no penalty (read-A
-     * vs ref-G after reverse-strand BS conversion, seen as G→A on forward).
+    /* BS-aware score matrix. In meth mode we overwrite opt->mat with a
+     * BS-friendly variant: T (query) vs C (ref) = match. This covers reads
+     * from either strand uniformly — BWA-MEM2's F+RC(F) index layout
+     * always presents the reference to the extension code in the same
+     * orientation as the read was sequenced, so the C→T BS asymmetry is
+     * in a single direction (read-T-for-ref-C) regardless of origin.
      * Row = query base (A=0,C=1,G=2,T=3), col = reference base. */
     if (opt->meth_dual_index) {
-        bwa_fill_scmat(opt->a, opt->b, opt->meth_mat_ot);
-        opt->meth_mat_ot[3 * 5 + 1] = opt->a;   /* T (query) vs C (ref) = match */
-        bwa_fill_scmat(opt->a, opt->b, opt->meth_mat_ob);
-        opt->meth_mat_ob[0 * 5 + 2] = opt->a;   /* A (query) vs G (ref) = match */
+        opt->mat[3 * 5 + 1] = opt->a;           /* T (query) vs C (ref) = match */
+        memcpy(opt->meth_mat_ot, opt->mat, 25); /* cached for debug/inspection */
+        memcpy(opt->meth_mat_ob, opt->mat, 25);
     }
 
     /* Load bwt2/FMI index. In --meth-index mode the FMI is loaded from

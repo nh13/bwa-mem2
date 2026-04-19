@@ -178,8 +178,10 @@ if [[ "$TOTAL3" -lt 1 ]]; then echo "FAIL layer 3: zero records in output BAM"; 
 "$SAMTOOLS" view /tmp/meth_native.bam 2>/dev/null > /tmp/meth_native.sam
 YDF3="$(grep -c YD:Z:f /tmp/meth_native.sam || true)"
 YDR3="$(grep -c YD:Z:r /tmp/meth_native.sam || true)"
-# OT-only for now: every mapped record gets YD:Z:f, none YD:Z:r. Once OB
-# wires up this assertion flips to "both > 0".
-if [[ "$YDF3" -lt 1 ]]; then echo "FAIL layer 3: no YD:Z:f tags (OT path)"; exit 1; fi
+# meth_hyp is derived from which half of the FMI matched (rb < l_pac → f,
+# else r), so both directions should be populated on any realistic PE BS
+# fixture.
+if [[ "$YDF3" -lt 1 ]]; then echo "FAIL layer 3: no YD:Z:f tags"; exit 1; fi
+if [[ "$YDR3" -lt 1 ]]; then echo "FAIL layer 3: no YD:Z:r tags"; exit 1; fi
 
 echo "OK layer 3: bwa-mem2 meth native (records=$TOTAL3, YD:Z:f=$YDF3 YD:Z:r=$YDR3)"
