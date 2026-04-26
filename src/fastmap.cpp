@@ -550,8 +550,10 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
                     }
                     meth_bam_group_propagate_qcfail(group, total);
                     for (int j = 0; j < total; ++j) {
+#ifndef DISABLE_OUTPUT
                         if (meth_bam_writer_write(g_meth_bam_writer, group[j]) < 0)
                             err_fatal(__func__, "failed to write meth BAM record");
+#endif
                         bam_writer_free(group[j]);
                     }
                     free(group);
@@ -559,15 +561,19 @@ ktp_data_t *kt_pipeline(void *shared, int step, void *data, mem_opt_t *opt, work
             } else if (aux->bam_writer != NULL) {
                 for (int k = 0; k < group_size; ++k) {
                     for (int j = 0; j < ret->seqs[i+k].n_bams; ++j) {
+#ifndef DISABLE_OUTPUT
                         if (bam_writer_write(aux->bam_writer, (struct bam1_t *)ret->seqs[i+k].bams[j]) < 0)
                             err_fatal(__func__, "failed to write BAM record");
+#endif
                         bam_writer_free((struct bam1_t *)ret->seqs[i+k].bams[j]);
                     }
                 }
             } else {
                 for (int k = 0; k < group_size; ++k) {
                     if (ret->seqs[i+k].sam) {
+#ifndef DISABLE_OUTPUT
                         fputs(ret->seqs[i+k].sam, aux->fp);
+#endif
                     }
                 }
             }

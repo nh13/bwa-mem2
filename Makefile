@@ -356,6 +356,39 @@ pgo-use:
 pgo-clean:
 	rm -rf $(PGO_PROFILE_DIR) bwa-mem2.pgo-instr bwa-mem2.pgo
 
+# Compute-only profile build. Skips SAM/BAM write calls (-DDISABLE_OUTPUT) so
+# wall-clock measurements exclude I/O. All upstream alignment work runs
+# unchanged; the per-stage tprof[] counters (printed at end of run) are
+# unaffected.
+# Usage: make profile-build
+#        ./bwa-mem2.profile mem -t N idx r1.fq.gz r2.fq.gz > /dev/null
+# ARM-only for now; mirrors pgo-generate's arch=arm64 pattern.
+profile-build:
+	rm -f src/*.o $(BWA_LIB); cd ext/safestringlib/ && $(MAKE) clean;
+	$(MAKE) arch=arm64 EXE=bwa-mem2.profile CXXFLAGS="-g -O3 -fpermissive $(ARCH_FLAGS) -DDISABLE_OUTPUT" CXX=$(CXX) all
+	@echo "Compute-only profile binary: bwa-mem2.profile (SAM/BAM writes skipped)"
+
+profile-clean:
+	rm -f bwa-mem2.profile
+
+# Link-Time Optimization build.
+# Usage: make lto-build
+#        ./bwa-mem2.lto mem -t N idx r1.fq.gz r2.fq.gz
+# Compiles all bwa-mem2 sources with LTO and links with LTO. Non-bwa-mem2
+# deps (htslib, mimalloc, safestringlib) keep their non-LTO objects; the
+# linker still does LTO across bwa-mem2's own .o. On GCC,
+# -fno-semantic-interposition additionally allows more aggressive inlining
+# across translation units (no effect on clang, silently ignored).
+LTO_FLAG := $(if $(findstring clang,$(shell $(CXX) --version 2>&1 | head -1)),-flto=thin,-flto)
+
+lto-build:
+	rm -f src/*.o $(BWA_LIB); cd ext/safestringlib/ && $(MAKE) clean;
+	$(MAKE) arch=arm64 EXE=bwa-mem2.lto CXXFLAGS="-g -O3 -fpermissive $(ARCH_FLAGS) $(LTO_FLAG) -fno-semantic-interposition" CXX=$(CXX) all
+	@echo "LTO binary: bwa-mem2.lto ($(LTO_FLAG))"
+
+lto-clean:
+	rm -f bwa-mem2.lto
+
 # Print the effective mimalloc setting. Used by CI and humans.
 print-mimalloc-config:
 	@echo "USE_MIMALLOC=$(USE_MIMALLOC)"

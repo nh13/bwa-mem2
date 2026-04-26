@@ -32,6 +32,9 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
 #include <stdio.h>
 #include <zlib.h>
 #include <assert.h>
+#if defined(__linux__)
+#include <sys/mman.h>
+#endif
 #include "bntseq.h"
 #include "bwa.h"
 #include "ksw.h"
@@ -419,8 +422,17 @@ bwaidx_t *bwa_idx_load_from_disk(const char *hint, int which)
         if (bwa_verbose >= 3)
             fprintf(stderr, "[M::%s] read %d ALT contigs\n", __func__, c);
         if (which & BWA_IDX_PAC) {
-            idx->pac = (uint8_t*) calloc(idx->bns->l_pac/4+1, 1);
-            err_fread_noeof(idx->pac, 1, idx->bns->l_pac/4+1, idx->bns->fp_pac); // concatenated 2-bit encoded sequence
+            int64_t pac_bytes = idx->bns->l_pac/4+1;
+            idx->pac = (uint8_t*) calloc(pac_bytes, 1);
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+            // Pack table is ~800 MB for hg38 — accessed at every candidate
+            // alignment for reference fetch. Request transparent hugepages
+            // to reduce dTLB pressure and tame the 4-KB-page demotion spikes
+            // that cause bimodal wall-clock variance on large indices.
+            if (idx->pac != NULL && pac_bytes > 0)
+                (void)madvise(idx->pac, pac_bytes, MADV_HUGEPAGE);
+#endif
+            err_fread_noeof(idx->pac, 1, pac_bytes, idx->bns->fp_pac); // concatenated 2-bit encoded sequence
             err_fclose(idx->bns->fp_pac);
             idx->bns->fp_pac = 0;
         }

@@ -3,4 +3,5 @@
 *.dSYM
 .*.swp
 a.out
-src/version.h
+bwa-mem2
+bwa-mem2.*

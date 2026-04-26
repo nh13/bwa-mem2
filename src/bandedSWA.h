@@ -110,7 +110,15 @@ typedef struct dnaSeqPair
     int seqid, regid;
     int32_t score, tle, gtle, qle;
     int32_t gscore, max_off;
-
+    // PR 26c.1: per-pair SW band upper bound derived from the ungapped
+    // score. 0 means "use default opt->w"; any positive value is an
+    // upper bound on useful band offset for this pair.
+    int32_t tight_band;
+    // Q3 instrumentation: would-be ungapped extension score (full diagonal
+    // walk, mirrors the HIT-path walk semantics). Computed at LEFT queue
+    // time for non-HIT pairs; carried through SW retry-collect; read at
+    // commit. -1 means undefined (e.g., zero-length).
+    int32_t ugp_walk_score;
 }SeqPair;
 
 
@@ -345,9 +353,14 @@ private:
     int8_t w_ambig;
     int8_t *F8_;
     int8_t *H8_, *H8__;
-    
+
     int16_t *F16_;
     int16_t *H16_, *H16__;
+
+    // Single 64-byte-aligned slab backing F8_/H8_/H8__/F16_/H16_/H16__.
+    // The six member pointers above are views into this slab; the
+    // destructor frees only `dp_slab_`.
+    void *dp_slab_;
 
     int64_t sort1Ticks;
     int64_t setupTicks;
