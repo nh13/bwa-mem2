@@ -45,6 +45,16 @@ extern uint64_t prof[10][112];
 #define DUMMY1 99
 #define DUMMY2 100
 
+// Asymmetric AMBIG encoding for the 16-bit LUT prepass (mirroring kswv).
+//   AMBR16 = 15: ref-N stored in s1 (XOR with ACGT 0..3 → 12..15)
+//   AMBQ16 = 16: query-N stored in s2 (XOR with ACGT 0..3 → 16..19;
+//                 XOR with ref-N → 31)
+// The asymmetric encoding ensures all "any-N" XORs land in the upper
+// half of the 32-entry LUT (12..19, 31) and never collide with the
+// match/mismatch slots (0..3). See SBT_PREPASS16_LUT below.
+#define AMBR16 15
+#define AMBQ16 16
+
 // Build the 16-byte LUT used by SBT_PREPASS8_LUT across all 8-bit kernel
 // variants (AVX2, AVX-512BW, SSE2/NEON). Layout:
 //   [0]      = w_match    (s1 == s2, both ACGT)
@@ -2070,6 +2080,9 @@ void BandedPairWiseSW::smithWaterman256_16(uint16_t seq1SoA[],
         f21 = _mm512_max_epi8(val512, f21);                             \
     }
 
+// 5-op cmpeq+blend+max+movepi+blend prepass. Compatible with the legacy
+// symmetric AMBIG=0xFFFF SoA encoding. Retained for callers that do not
+// build the 32-entry LUT (e.g. the AVX2/AVX-512F 256-bit kernel).
 #define SBT_PREPASS16(s1, s2, sbt11_out, mismatch512, match512, w_ambig_512) \
     {                                                                   \
         __mmask32 cmp_ = _mm512_cmpeq_epi16_mask(s1, s2);               \
@@ -2077,6 +2090,24 @@ void BandedPairWiseSW::smithWaterman256_16(uint16_t seq1SoA[],
         __m512i tmp_ = _mm512_max_epu16(s1, s2);                        \
         __mmask32 amb_ = _mm512_movepi16_mask(tmp_);                    \
         sbt11_out = _mm512_mask_blend_epi16(amb_, sbt_, w_ambig_512);   \
+    }
+
+// 2-op LUT prepass (mirrors kswv's MAIN_SAM_CODE16_OPT). Caller MUST use
+// the asymmetric AMBR16=15 / AMBQ16=16 SoA encoding so all reachable XORs
+// fall into the 32-entry LUT slots {0..3, 12..19, 31}. The LUT (`pmat512`)
+// is built once per kernel invocation:
+//   pmat[0]               = w_match
+//   pmat[1, 2, 3]         = w_mismatch
+//   pmat[12..15]          = w_ambig  (AMBR16 ⊕ ACGT)
+//   pmat[16..19]          = w_ambig  (AMBQ16 ⊕ ACGT)
+//   pmat[31]              = w_ambig  (AMBR16 ⊕ AMBQ16)
+//   other slots           = 0        (unreachable for valid input;
+//                                     DUMMY-pad cells land here but
+//                                     don't contribute to the answer)
+#define SBT_PREPASS16_LUT(s1, s2, sbt11_out, pmat512)                   \
+    {                                                                   \
+        __m512i xor_ = _mm512_xor_si512(s1, s2);                        \
+        sbt11_out = _mm512_permutexvar_epi16(xor_, pmat512);            \
     }
 
 #define MAIN_CODE16_CORE(sbt11, h00, h11, e11, f11, f21, zero512, e_ins512, oe_ins512, e_del512, oe_del512) \
@@ -3023,7 +3054,13 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
 
                 for(k = 0; k < sp.len1; k++)
                 {
-                    mySeq1SoA[k * SIMD_WIDTH16 + j] = (seq1[k] == AMBIG ? dmask4:seq1[k]);
+                    // PR: asymmetric AMBIG encoding for SBT_PREPASS16_LUT.
+                    // Ref-N maps to AMBR16=15 (was 0xFFFF). Tail-pad cells
+                    // (k >= sp.len1) are still set to DUMMY1 below; their
+                    // LUT lookup is undefined but does not affect the
+                    // answer since the DP result is read at (sp.len1,
+                    // sp.len2), not in the tail region.
+                    mySeq1SoA[k * SIMD_WIDTH16 + j] = (seq1[k] == AMBIG ? AMBR16 : seq1[k]);
                     H2[k * SIMD_WIDTH16 + j] = 0;
                 }
                 
@@ -3064,8 +3101,12 @@ void BandedPairWiseSW::smithWatermanBatchWrapper16(SeqPair *pairArray,
                 seq2 = seqBufQer + (int64_t)sp.idq;
                 for(k = 0; k < sp.len2; k++)
                 {
-                    mySeq2SoA[k * SIMD_WIDTH16 + j] = (seq2[k]==AMBIG?dmask4:seq2[k]);
-                    H1[k * SIMD_WIDTH16 + j] = 0;                   
+                    // PR: asymmetric AMBIG encoding for SBT_PREPASS16_LUT.
+                    // Query-N maps to AMBQ16=16 (was 0xFFFF). Combined
+                    // with AMBR16=15 in the ref, all reachable XORs land
+                    // in LUT slots {0..3, 12..19, 31}.
+                    mySeq2SoA[k * SIMD_WIDTH16 + j] = (seq2[k] == AMBIG ? AMBQ16 : seq2[k]);
+                    H1[k * SIMD_WIDTH16 + j] = 0;
                 }
                 if(maxLen2 < sp.len2) maxLen2 = sp.len2;
             }
@@ -3195,7 +3236,21 @@ void BandedPairWiseSW::smithWaterman512_16(uint16_t seq1SoA[],
     __m512i gapOE512     = _mm512_set1_epi16(this->w_open + this->w_extend);
     __m512i w_ambig_512  = _mm512_set1_epi16(this->w_ambig);    // ambig penalty
     __m512i five512      = _mm512_set1_epi16(5);
-    
+
+    // 32-entry int16 LUT for SBT_PREPASS16_LUT. See macro comment in
+    // bandedSWA.cpp:~2073 for slot semantics. Built once per kernel
+    // invocation; constant for the lifetime of the call.
+    int16_t pmat16_temp[SIMD_WIDTH16] __attribute__((aligned(64))) = {0};
+    pmat16_temp[0]  = this->w_match;                         // ACGT match
+    pmat16_temp[1]  = pmat16_temp[2]  = pmat16_temp[3]
+                    = this->w_mismatch;                       // ACGT mismatch
+    pmat16_temp[12] = pmat16_temp[13] = pmat16_temp[14]
+                    = pmat16_temp[15] = this->w_ambig;        // ref-N (15) × ACGT
+    pmat16_temp[16] = pmat16_temp[17] = pmat16_temp[18]
+                    = pmat16_temp[19] = this->w_ambig;        // query-N (16) × ACGT
+    pmat16_temp[31] = this->w_ambig;                          // ref-N × query-N
+    __m512i pmat512 = _mm512_load_si512((__m512i*) pmat16_temp);
+
     __m512i e_del512    = _mm512_set1_epi16(this->e_del);
     __m512i oe_del512   = _mm512_set1_epi16(this->o_del + this->e_del);
     __m512i e_ins512    = _mm512_set1_epi16(this->e_ins);
@@ -3351,11 +3406,15 @@ void BandedPairWiseSW::smithWaterman512_16(uint16_t seq1SoA[],
         tim1 = __rdtsc();
 #endif
         
-        // PR 17: AVX-512 16-bit score pre-pass (fission only, no LUT).
+        // PR: AVX-512 16-bit score pre-pass via 32-entry permutexvar LUT.
+        // Replaces the legacy 5-op cmpeq+blend+max+movepi+blend prepass.
+        // Requires asymmetric AMBIG encoding (AMBR16=15, AMBQ16=16) at
+        // the SoA fill step above. pmat512 was built once at the top
+        // of this function.
         for (int jp = beg; jp < end; jp++) {
             __m512i s2 = _mm512_load_si512((__m512i *)(seq2SoA + jp * SIMD_WIDTH16));
             __m512i sbt11;
-            SBT_PREPASS16(s10, s2, sbt11, mismatch512, match512, w_ambig_512);
+            SBT_PREPASS16_LUT(s10, s2, sbt11, pmat512);
             _mm512_store_si512((__m512i *)(sbt_buf + jp * SIMD_WIDTH16), sbt11);
         }
 
