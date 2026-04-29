@@ -28,6 +28,23 @@ Authors: Vasimuddin Md <vasimuddin.md@intel.com>; Sanchit Misra <sanchit.misra@i
          Heng Li <hli@jimmy.harvard.edu>
 *****************************************************************************************/
 
+/* Ungapped-fast-path (UGP) instrumentation gate.
+ *
+ * fg-labs's mem_chain2aln_across_reads_V2 carries a multi-axis telemetry
+ * harness left over from the analyses that drove PR #58 (consolidated
+ * mapping speedups): per-pair score histograms, fine-grained tight_band
+ * bins, would-be ungapped-walk scores, and similar counters. perf record
+ * on c7i (Intel Sapphire Rapids, panel-twist 1M) measured this telemetry
+ * at ~3-4% of compute — chiefly the O(len2) ungapped_walk_score call on
+ * every non-HIT LEFT pair plus a per-pair bin-classification ladder on
+ * each side. The data is research-grade; production builds don't need it.
+ *
+ * Default: 0 (off). Build with `-DBWAMEM_UGP_TELEMETRY=1` to re-enable.
+ */
+#ifndef BWAMEM_UGP_TELEMETRY
+#define BWAMEM_UGP_TELEMETRY 0
+#endif
+
 #include "bwamem.h"
 #include "FMI_search.h"
 #include "memcpy_bwamem.h"
@@ -2398,6 +2415,7 @@ static inline int ugp_delta_bin(int d)
  * instead of drifting across six near-identical inlined blocks. */
 static inline void ugp_record_left_outcome(const SeqPair *sp, int a_match, int tid)
 {
+#if BWAMEM_UGP_TELEMETRY
     int _u = (sp->qle == sp->tle);
     tprof[UGP_OUTCOME_BASE + 0 * 2 + (_u ? 0 : 1)][tid]++;
     tprof[UGP_SCORE_HIST_BASE + 0 * UGP_SCORE_HIST_NBINS
@@ -2420,14 +2438,21 @@ static inline void ugp_record_left_outcome(const SeqPair *sp, int a_match, int t
         tprof[UGP_L_CAT_UNG_BASE + 2 * UGP_CAT_NBINS + _bin_ung][tid]++;
         tprof[UGP_L_CAT_FIN_BASE + 2 * UGP_CAT_NBINS + _bin_fin][tid]++;
     }
+#else
+    (void)sp; (void)a_match; (void)tid;
+#endif
 }
 
 static inline void ugp_record_right_outcome(const SeqPair *sp, int tid)
 {
+#if BWAMEM_UGP_TELEMETRY
     int _u = (sp->qle == sp->tle);
     tprof[UGP_OUTCOME_BASE + 1 * 2 + (_u ? 0 : 1)][tid]++;
     tprof[UGP_SCORE_HIST_BASE + 1 * UGP_SCORE_HIST_NBINS
           + ugp_score_bin(sp->score)][tid]++;
+#else
+    (void)sp; (void)tid;
+#endif
 }
 
 /* Q3 helper: would-be ungapped extension score for arbitrary N. Mirrors the
@@ -2951,7 +2976,8 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                         else {
                             numPairsLeft1++;   t_tier = 2;  /* scalar; not bucketed */
                         }
-                        /* tight_band histogram bin. */
+#if BWAMEM_UGP_TELEMETRY
+                        /* tight_band histogram bin (telemetry only). */
                         int tb_ = sp.tight_band;
                         int fine_bin;
                         if      (tb_ ==  0) fine_bin = 0;
@@ -2973,15 +2999,24 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
                             else                band_bin = 3;
                             tprof[UGP_TIER_TB_BASE + 0 * 8 + t_tier * 4 + band_bin][tid]++;
                         }
+#else
+                        (void)t_tier;
+#endif
                     }
 
                     /* Q3: compute would-be ungapped extension score for this
                      * non-HIT LEFT pair. The walk handles arbitrary N
                      * (including the bypass case len2 > FP_N_MAX where
                      * analyze did not run). Cost: O(len2) scalar; called
-                     * for instrumentation only — discard if reverting. */
+                     * for instrumentation only — gated to keep that cost
+                     * out of production builds. ugp_walk_score is consumed
+                     * solely by ugp_record_left_outcome. */
+#if BWAMEM_UGP_TELEMETRY
                     sp.ugp_walk_score = ungapped_walk_score(qs, rs, sp.len2,
                                                             sp.h0, opt->a, opt->b);
+#else
+                    sp.ugp_walk_score = 0;
+#endif
 
                     seqPairArrayLeft128[numPairsLeft] = sp;
                     numPairsLeft ++;
@@ -3539,7 +3574,10 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
 
     /* instrumentation (Groups A, B, C — RIGHT). Run after the post-
      * left-SW analyze pass + tier sort: sp->tight_band is now final and the
-     * 128 region is contiguous at the head of seqPairArrayRight128. */
+     * 128 region is contiguous at the head of seqPairArrayRight128. Pure
+     * telemetry — gated to keep its O(numPairsRight) per-pair classification
+     * out of production builds. */
+#if BWAMEM_UGP_TELEMETRY
     {
         int narrow_sz = 0;
         for (int l = 0; l < numPairsRight; l++) {
@@ -3583,6 +3621,7 @@ void mem_chain2aln_across_reads_V2(const mem_opt_t *opt, const bntseq_t *bns,
         else                       bin = 7;
         tprof[UGP_NARROW_SZ_BASE + 1 * UGP_NARROW_SZ_NBINS + bin][tid]++;
     }
+#endif
 
     pair_ar = seqPairArrayRight128 + numPairsRight128 + numPairsRight16;
     pair_ar_aux = seqPairArrayAux;
