@@ -1192,8 +1192,15 @@ int mem_matesw_batch_pre(const mem_opt_t *opt, const bntseq_t *bns,
             
             uint8_t *qs = seqBufQer + sp.idq;
             uint8_t *rs = seqBufRef + sp.idr;
-            for (int l=0; l<sp.len1; l++) rs[l] = ref[l];
-            for (int l=0; l<sp.len2; l++) qs[l] = seq[l];
+            // memcpy lets libc use the platform's vectorized copy path
+            // (REP MOVSB / AVX-512 stream on x86, SVE/NEON on ARM) rather
+            // than the byte-at-a-time scalar loop the compiler can't safely
+            // vectorize without aliasing/bounds proofs. ref aliases ref_string
+            // (zero-copy slice from bns_fetch_seq_v2); seq is either the
+            // mate sequence or a malloc'd reverse-complement; neither
+            // overlaps the seqBuf{Qer,Ref} worker buffers.
+            memcpy(rs, ref, sp.len1);
+            memcpy(qs, seq, sp.len2);
 
             gar[gcnt + r] = pcnt;
             sp.regid = pcnt;
