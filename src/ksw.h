@@ -103,6 +103,21 @@ extern "C" {
 	kswr_t ksw_align2(int qlen, uint8_t *query, int tlen, uint8_t *target, int m, const int8_t *mat, int o_del, int e_del, int o_ins, int e_ins, int xtra, kswq_t **qry);
 
 	/**
+	 * Same as ksw_align2, but skips the KSW_XSTART reverse-pass that
+	 * recovers `qb`/`tb` (alignment start coords). Use when the caller
+	 * only consumes `r.score` / `r.qe` / `r.te`. Saves ~half of ksw_align2's
+	 * cycle budget per call (one revseq + one qprofile rebuild + one
+	 * forward kernel pass).
+	 *
+	 * The return `kswr_t` has `qb = tb = -1` (sentinel from `g_defr` in
+	 * `ksw.cpp`); reading those fields is undefined.
+	 *
+	 * KSW_XSTART in `xtra` is silently ignored. KSW_XSUBO and KSW_XSTOP
+	 * still affect the forward pass as in ksw_align2.
+	 */
+	kswr_t ksw_align2_score_only(int qlen, uint8_t *query, int tlen, uint8_t *target, int m, const int8_t *mat, int o_del, int e_del, int o_ins, int e_ins, int xtra, kswq_t **qry);
+
+	/**
 	 * Banded global alignment
 	 *
 	 * @param qlen    query length

@@ -381,6 +381,24 @@ kswr_t ksw_align2(int qlen, uint8_t *query, int tlen, uint8_t *target,
 	return r;
 }
 
+kswr_t ksw_align2_score_only(int qlen, uint8_t *query, int tlen, uint8_t *target,
+							 int m, const int8_t *mat, int o_del, int e_del,
+							 int o_ins, int e_ins, int xtra, kswq_t **qry)
+{
+	kswq_t *q;
+	kswr_t r;
+	kswr_t (*func)(kswq_t*, int, const uint8_t*, int, int, int, int, int);
+
+	q = (qry && *qry)? *qry : ksw_qinit((xtra & KSW_XBYTE)? 1 : 2, qlen, query, m, mat);
+	if (qry && *qry == 0) *qry = q;
+	func = q->size == 2? ksw_i16 : ksw_u8;
+
+	r = func(q, tlen, target, o_del, e_del, o_ins, e_ins, xtra);
+
+	if (qry == 0) free(q);
+	return r;
+}
+
 kswr_t ksw_align2_orig_bak(int qlen, uint8_t *query, int tlen, uint8_t *target,
 						   int m, const int8_t *mat, int o_del, int e_del,
 						   int o_ins, int e_ins, int xtra, kswq_t **qry)

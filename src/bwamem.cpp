@@ -574,7 +574,10 @@ int mem_seed_sw(const mem_opt_t *opt, const bntseq_t *bns, const uint8_t *pac,
     rseq = bns_fetch_seq(bns, pac, &rb, mid, &re, &rid);
     // No qry-profile cache: each seed slices a different sub-query
     // (query+qb, qe-qb), so ksw_align2 always builds a fresh profile.
-    x = ksw_align2(qe - qb, (uint8_t*)query + qb, re - rb, rseq, 5, opt->mat, opt->o_del, opt->e_del, opt->o_ins, opt->e_ins, KSW_XSTART, NULL);
+    // mem_seed_sw uses only x.score, so use the score-only variant
+    // that skips the KSW_XSTART reverse-pass (saves ~half of the
+    // ksw_align2 cycle budget per call).
+    x = ksw_align2_score_only(qe - qb, (uint8_t*)query + qb, re - rb, rseq, 5, opt->mat, opt->o_del, opt->e_del, opt->o_ins, opt->e_ins, 0, NULL);
     free(rseq);
     return x.score;
 }
